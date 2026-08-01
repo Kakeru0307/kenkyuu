@@ -1,0 +1,21 @@
+---
+description: >-
+  When synthetic/training dataset definition or regenerated counts change,
+  update docs/データ/データセット.md in the same change.
+alwaysApply: true
+---
+
+# Dataset doc sync
+
+**When:** Changing `PATTERN_WEIGHTS`, `ATTACKS_PER_BAR_*`, synthetic count/bars,
+prepare_all defaults, or after Colab regenerates `manifest` counts.
+
+**Do:** Update [`docs/データ/データセット.md`](docs/データ/データセット.md) in the same turn:
+
+1. 先頭の「最終更新」日付
+2. §0 サマリー / 生成定義の要点
+3. 該当 §1（合成）などの表・本数
+4. §1-6 / §7 に履歴行
+
+定義だけ先に変え、実 MIDI が未再生成なら「再生成待ち」と明記する。  
+勝手に古い本数表を残したままにしない。

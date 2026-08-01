@@ -1,0 +1,34 @@
+---
+description: >-
+  How to write backing/generation experiment logs under docs/生成結果
+  (data / one MIDI / conclusion). Execution pipeline: generate-and-log skill.
+alwaysApply: true
+---
+
+# Generation result logs (`docs/生成結果`)
+
+**When:** Logging a generation experiment (data change, new ckpt, deliberate sample).  
+Skip for code-only edits with no MIDI / no experiment record request.
+
+## Required entry shape
+
+| Field | Rule |
+|-------|------|
+| Run folder | `docs/生成結果/<M>-<D>-<HH>-<mm>/` （例: `7-27-13-33`）。Windows のため時刻は `:` ではなく `-` |
+| Collision | 同分が既にある → 末尾に秒 `-<SS>`（例: `7-27-13-33-05`） |
+| Contents | そのフォルダ直下に **md と midi を同居**（別サブフォルダに分けない） |
+| MIDI | エントリあたり **1本**。md と同 stem 推奨。パスは repo 相対で記載 |
+| Headings | Exactly these three (in order): |
+
+1. `## データの内容`
+2. `## 生成結果`
+3. `## 得られた結論`
+
+Do not dump multiple MIDIs into one entry. Do not invent subjective scores.
+
+## Who runs the pipeline
+
+For generate → MusPy → copy MIDI → write entry, follow the project skill  
+`.cursor/skills/generate-and-log/SKILL.md`.
+
+Evaluation axes (M1–M4, Chu Q1–O1) stay defined in `post-generation-eval.mdc`.

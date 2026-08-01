@@ -1,0 +1,86 @@
+---
+description: >-
+  Final generation north star: text → emotion prior → form layer → guitar MIDI
+  → ViTex annotation. Do not confuse interim paths or D3PM.
+alwaysApply: true
+---
+
+# Final form (north star) — do not mislabel
+
+## Final form (goal)
+
+```text
+ふわっと日本語
+  → 文/感情エンコーダ（WRIME 等）
+  → 条件 prior（短い）: 雰囲気 → 進行・キー・BPM 等を学習分布からサンプル
+  → 構成レイヤ: セクション配置（Aメロ・サビ等）、長尺でも雰囲気を維持/意図的に変化
+  → バッキング／リード生成（各区間のギター演奏）
+  → ViTex 軽量注釈：表現・構造の符号付与（コード + hyperscore）
+  → （任意）ベロシティ等の強弱付与
+```
+
+役割の切り分け（混同禁止）:
+
+| レイヤ | 決めること |
+|--------|------------|
+| prior（短い） | 曲の色（ゆったり等）→ BPM・キー・進行の傾向 |
+| 構成 | サビの位置・区間長・区間ごとの変化。U-Net 単体の仕事ではない |
+| バッキング／リード | 渡された区間条件の下でのギター演奏 |
+| ViTex | 生成後の符号付与（D3PM 再生成ではない） |
+
+- 進行・キー・BPMの**明示指定は禁止**（必要になったらそのとき実装。最終形の本線に置かない）
+- 推論で manifest / 固定表から「学習曲1件」を選ばない
+- **ViTex D3PM / DualUNet 再生成は主軸外**（解析・符号付与のみ）
+- 短い prior だけでは 3–4 分尺のサビ付き曲は完成しない（構成レイヤが必須）
+- 説明してよいこと:
+  - 「学習した分布からサンプルして新規生成している」
+  - 「構成に沿って区間を並べている」
+  - 「生成後に ViTex 系でコード・hyperscore など表現符号を付与している」
+
+## ViTex 表現付与（最終形の後段・必須方針）
+
+- 役割: 演奏生成の **後** に、曲に合った **音楽符号を付与**
+  （roadmap Phase 5: chords + hyperscore。奏法・カッティング等は長期展望）
+- やること: 解析・注釈（`.npy` / メタ / 可視化）。**生成の置き換えではない**
+- やらないこと: D3PM で MIDI を作り直すことを「最終形」と呼ぶ
+- 固定ベロシティ書き出し ≠ 学習した強弱推定（強弱は別段階）
+
+## Not the final form (do not call these 最終形 / 本線完成)
+
+| Path | What it is |
+|------|------------|
+| `generate_backing.py` + U-Net（骨格→演奏） | **現行マイルストーン**。CLI は進行/キー/BPMを受け取らない（分布サンプル）。最終形ではない |
+| `sample_structure_params` の乱択 | prior 完成ではない |
+| `generate_from_prompt.py` + catalog / `--use-manifest` | **実験用**（`stash/prompt_legacy/`） |
+| manifest 1件選択 | 台帳ルックアップ |
+| 8小節クリップのみ | 構成レイヤなし。長尺・サビ付き曲の完成ではない |
+| ViTex D3PM 再生成 | 主軸外 |
+
+## How to talk / work
+
+- 「最終形」= prior + **構成** + 演奏 + ViTex。現状は未到達
+- 学習確認・ckpt スモークは `generate_backing.py`（引数なし／`--seed` のみ可）
+- 進行・キー・BPM を CLI で渡す入口を復活させない（内部関数引数は可）
+- 階段: **条件 prior** → **構成レイヤ** →（演奏の強化）→ **ViTex 注釈** →（任意）強弱
+- 縮小・順序変更は `.cursor/rules/no-silent-downscope.mdc` に従い理由を明示
+
+## Known pitfalls of this rule (agents: watch these)
+
+- prior だけで「サビのある長尺ができた」と言わない（構成が別レイヤ）
+- バッキング U-Net にサビ生成を押しつけない
+- `sample_structure_params` の乱択を「条件 prior 完成」と呼ばない
+- ViTex 後段・構成レイヤを忘れない
+- 明示指定 CLI（`--progression` 等）をルートに戻さない
+
+## Forbidden confusions
+
+```text
+❌ manifest選択 = 学習による自由生成
+❌ 短い prior だけ = 3–4分の曲完成
+❌ バッキング U-Net = サビ/構成を学習済み
+❌ BPM条件ch = モデルがBPMを生成した
+❌ 進行/キー/BPM明示指定 = 最終形の正規入力
+❌ ViTex D3PM = 最終形の表現付与
+❌ U-Net MIDI だけ = 最終形完了
+✅ 最終形 = 文→prior→構成→ギター演奏→ViTex注釈（明示指定なし）
+```

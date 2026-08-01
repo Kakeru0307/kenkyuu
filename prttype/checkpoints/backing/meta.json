@@ -1,0 +1,9 @@
+{
+  "role": "backing",
+  "input_mode": "downbeat_chord",
+  "description": "進行骨格 → バッキングギター生成用",
+  "source": "stage1 (合成・音価多様化後の再学習)",
+  "train": { "epochs": 40, "lr": 0.001, "pos_weight": 20 },
+  "updated": "2026-07-20",
+  "note": "音価多様化（solid/staccato/mixed/sustained/rests）入り合成データで Stage1 再学習した CKPT。詳細は docs/issues-and-resolution-order.md"
+}

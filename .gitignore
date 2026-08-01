@@ -1,0 +1,27 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Colab（別リポジトリで管理）
+colab_train/
+
+# データ・生成物（Colab 側で生成）
+prttype/data/
+prttype/midi/
+*.npy
+
+# 旧 checkpoint（stash）
+prttype/stash/checkpoints_legacy/
+
+# 生成結果フォルダに誤配置された checkpoint
+docs/生成結果/**/*.pt
+
+# Cursor handoff（ローカル専用）
+.cursor/handoff/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,24 @@
+---
+description: >-
+  On new chats/tabs, load session handoff once from `.cursor/handoff/HANDOFF.md`
+  (fallback archives) before project work. Do not reload every turn.
+alwaysApply: true
+---
+
+# Handoff load (once per conversation)
+
+**Run at most once per conversation.** If you already read a handoff in this
+chat, do not read or brief again unless the user asks (`/handoff-load`, 「引き継ぎ」).
+
+## When (first substantial turn only)
+
+At conversation start, before substantial project work (edits, multi-step plans,
+training advice):
+
+1. Skip if the user says this is an unrelated new topic.
+2. Read `.cursor/handoff/HANDOFF.md` if non-empty.
+3. Else newest `*_handoff.md`: `docs/user/` → `docs/auto/` → `docs/version/`.
+4. Brief in 3 lines: Goal / Status / Next. No full paste.
+5. Follow Decisions; do not overturn without asking.
+
+Detailed procedure: `handoff-load` skill. Saving: `handoff-save` skill only.

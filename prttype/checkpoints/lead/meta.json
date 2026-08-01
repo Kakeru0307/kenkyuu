@@ -1,0 +1,8 @@
+{
+  "role": "lead",
+  "input_mode": "downbeat_chord+power_attack_mask",
+  "description": "旧checkpointは12ch単音リード。次回は13ch（コード骨格+BPM+backing power attack mask）、単音主体+一部power chordで20 epoch新規学習",
+  "path": "checkpoints/lead/unet_last.pt",
+  "updated": "2026-07-18",
+  "note": "現行unet_last.ptは旧均一データ（epochs=40）。2026-08-01定義変更は未反映"
+}

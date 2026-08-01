@@ -1,0 +1,34 @@
+---
+description: >-
+  Do not default to shipping a smaller interim. If proposing a reduced scope,
+  always state explicit reasons first and get alignment.
+alwaysApply: true
+---
+
+# No silent downscope
+
+## Default
+
+ユーザーが目標（最終形・本線）を示したら、**その目標に向けて実装・設計する**。
+「まず小さく」「暫定ルールで仮置き」「後で prior」などへ **黙って落とさない**。
+
+## When a smaller step is proposed
+
+縮小・暫定・マイルストーン分割を出すときは、**提案の前に理由を明示**する。例:
+
+- データ不足で学習 prior が推定できない
+- 依存（WRIME 等）が環境に無く本線が動かない
+- ユーザーが明示的に分割を求めた
+- 技術的ブロッカー（再現手順つき）
+
+理由なしの「小さく出しましょう」は禁止。
+
+## How to talk
+
+```text
+❌ とりあえずルールで感情→BPMにして、prior は後で
+✅ 本線は学習 prior。ただし現状 X のため先行できない／分割する理由は Y。よければ本線のまま進める
+```
+
+最終形ルール（`.cursor/rules/final-generation-form.mdc`）と矛盾する簡易経路を、
+完成扱い・本線扱いにしない。

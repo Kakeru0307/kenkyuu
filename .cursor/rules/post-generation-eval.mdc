@@ -1,0 +1,49 @@
+---
+description: >-
+  After each music/MIDI generation, run MusPy objective eval and collect Chu
+  subjective ratings. Source: docs/evaluation-criteria-slides.md
+alwaysApply: true
+---
+
+# Post-generation music evaluation
+
+**When:** After any music generation succeeds (MIDI written). Skip if code-only
+edits with no new MIDI.
+
+## 1. Objective (always try first)
+
+Run MusPy via:
+
+```text
+py -3 prttype/evaluate_midi.py <path.mid> --key <KEY> --mode <MODE>
+```
+
+Or rely on `generate_from_prompt.py` (default `--eval`; disable with `--no-eval`).
+
+Report M1–M4 from the script. These are **person-independent** validity checks,
+not aesthetic quality. M5 (OA/KLD) needs a reference corpus — skip unless asked.
+
+## 2. Subjective (ask the user)
+
+Ask for **Q1–Q4 + O1** on a **1–5** scale (do not invent scores):
+
+| ID | Axis | Definition |
+|----|------|------------|
+| Q1 | Melodiousness | 旋律として音楽的・調和的に聞こえるか |
+| Q2 | Rhythmicity | 拍・リズムにまとまりがあるか |
+| Q3 | Structureness | 反復や展開など、構造的なまとまりがあるか |
+| Q4 | Correctness | 突然の無音・不自然な飛びなど、技術的破綻が少ないか |
+| O1 | Overall | 総合的に、この曲の聴感品質に満足できるか |
+
+## 3. Summary
+
+Short table: MusPy numbers + user scores. If any Qi/O1 ≤ 2, one-line next fix.
+
+Do **not** use SongEval axes or Chu Creativity / Richness / Naturalness / Coherence
+unless the user asks.
+
+## Source of truth
+
+`docs/evaluation-criteria-slides.md` · `prttype/evaluate_midi.py`
+
+When logging an experiment under `docs/生成結果/`, use the `generate-and-log` skill.

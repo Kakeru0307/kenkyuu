@@ -1,0 +1,1 @@
+python generate_form.py --text "しんみりとした曲" --seed 42
