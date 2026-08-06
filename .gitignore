@@ -9,7 +9,8 @@ __pycache__/
 colab_train/
 
 # データ・生成物（Colab 側で生成）
-prttype/data/
+# data/ 直下は除外しつつ、accept.jsonl だけ追跡する
+prttype/data/**
 !prttype/data/prior_pairs/
 !prttype/data/prior_pairs/manifests/
 !prttype/data/prior_pairs/manifests/accept.jsonl
