@@ -10,6 +10,9 @@ colab_train/
 
 # データ・生成物（Colab 側で生成）
 prttype/data/
+!prttype/data/prior_pairs/
+!prttype/data/prior_pairs/manifests/
+!prttype/data/prior_pairs/manifests/accept.jsonl
 prttype/midi/
 *.npy
 
