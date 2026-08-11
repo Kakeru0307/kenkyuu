@@ -21,7 +21,7 @@ from pathlib import Path
 import muspy
 import numpy as np
 
-from makeData.constants import BPM_RANGE, DEFAULT_BARS, KEYS
+from makeData.constants import BPM_RANGE, DEFAULT_BARS, KEYS, TECHNIQUE_TYPES, technique_type_to_id
 from makeData.patterns import (
     choose_progression,
     generate_progression_lead,
@@ -30,8 +30,22 @@ from makeData.patterns import (
 from midi_to_patch import PATCH_TICKS, TICKS_PER_BAR, MidiPatch, midi_to_patches
 from progression_input import build_backing_skeleton_music
 from density_cond import bpm_to_unit
+from dataset_lead import make_technique_onehot_map
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+# テクニック別の音符長スケール係数（generate_progression_lead の duration に掛ける）。
+# これにより CVAE が technique_type と音符長のパターンを結びつけて学習できる。
+TECHNIQUE_DURATION_SCALE: dict[str, float] = {
+    "normal":      1.0,
+    "soft_bend":   1.5,   # やや長め（チョーキング中は音が伸びる）
+    "normal_bend": 2.0,   # 標準チョーキング（長音）
+    "hard_bend":   2.5,   # 強いチョーキング（最長）
+    "vibrato":     3.0,   # ビブラートは最長の持続音
+    "palm_mute":   0.4,   # パームミュートは短く刻む
+    "slide":       1.2,   # スライドはわずかに長め
+    "hammer_on":   0.6,   # ハンマーオンは速い連打
+}
 
 
 def _music_to_patches(music: muspy.Music, tmp_midi: Path) -> list[MidiPatch]:
@@ -65,6 +79,7 @@ def generate_lead_pairs(
     seed: int = 42,
     bars: int = DEFAULT_BARS,
     min_onsets: int = 1,
+    technique_cond: bool = True,
 ) -> dict:
     input_root = pairs_dir / "input"
     target_root = pairs_dir / "target"
@@ -80,6 +95,12 @@ def generate_lead_pairs(
             key = rng.choice(KEYS)
             bpm = rng.randint(*BPM_RANGE)
             bars_per_chord = rng.choice((1, 1, 1, 2))
+
+            # テクニック種別を均等に割り当て（各テクニックをまんべんなくカバー）
+            technique_type = TECHNIQUE_TYPES[i % len(TECHNIQUE_TYPES)]
+            dur_scale = TECHNIQUE_DURATION_SCALE[technique_type]
+            technique_id = technique_type_to_id(technique_type)
+
             blocked_power_onsets = sample_backing_power_chord_onsets(
                 bars=bars,
                 bpm=bpm,
@@ -90,6 +111,7 @@ def generate_lead_pairs(
                 spec=spec, key=key, bpm=bpm, bars=bars,
                 bars_per_chord=bars_per_chord, rng=rng,
                 blocked_power_onsets=blocked_power_onsets,
+                duration_scale=dur_scale,
             )
             input_music = build_backing_skeleton_music(
                 progression=spec, key=key, bars=bars, bpm=bpm,
@@ -121,12 +143,19 @@ def generate_lead_pairs(
                         bar_index=tgt.bar_index,
                     ),
                 )
+                if technique_cond:
+                    h, w = inp.tonal_chw.shape[1], inp.tonal_chw.shape[2]
+                    tech_map = make_technique_onehot_map(
+                        technique_id, height=h, width=w
+                    )
+                    np.save(in_dir / f"{stem}_technique.npy", tech_map)
                 saved += 1
 
             stats["songs"].append({
                 "song_id": song_id,
                 "progression": spec.name,
                 "key": key,
+                "technique_type": technique_type,
                 "patches": saved,
                 "blocked_power_onsets": len(blocked_power_onsets),
             })
@@ -149,6 +178,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--bars", type=int, default=DEFAULT_BARS)
     parser.add_argument("--min-onsets", type=int, default=1)
+    parser.add_argument(
+        "--no-technique-cond",
+        action="store_true",
+        help="*_technique.npy を保存しない（旧互換用）",
+    )
     args = parser.parse_args()
 
     generate_lead_pairs(
@@ -157,6 +191,7 @@ def main() -> None:
         seed=args.seed,
         bars=args.bars,
         min_onsets=args.min_onsets,
+        technique_cond=not args.no_technique_cond,
     )
 
 

@@ -34,6 +34,16 @@ ROLE_ENERGY: dict[SectionRole, EnergyLevel] = {
     "outro": "low",
 }
 
+# role → technique_type 候補（重み付き）。beat_type と同じ構造。
+ROLE_TECHNIQUE_CANDIDATES: dict[SectionRole, list[tuple[str, float]]] = {
+    "intro":  [("normal", 0.60), ("vibrato", 0.30), ("slide", 0.10)],
+    "a":      [("normal", 0.50), ("hammer_on", 0.25), ("vibrato", 0.15), ("slide", 0.10)],
+    "b":      [("normal", 0.35), ("vibrato", 0.25), ("soft_bend", 0.20), ("hammer_on", 0.20)],
+    "bridge": [("vibrato", 0.40), ("normal_bend", 0.30), ("normal", 0.20), ("slide", 0.10)],
+    "chorus": [("normal_bend", 0.30), ("hard_bend", 0.30), ("vibrato", 0.20), ("normal", 0.20)],
+    "outro":  [("normal", 0.50), ("vibrato", 0.30), ("soft_bend", 0.20)],
+}
+
 # role → beat_type 候補（重み付き）。energy / progression とは独立。
 ROLE_BEAT_CANDIDATES: dict[SectionRole, list[tuple[str, float]]] = {
     "intro": [
@@ -66,6 +76,15 @@ ROLE_BEAT_CANDIDATES: dict[SectionRole, list[tuple[str, float]]] = {
         ("ballad_sparse", 0.70),
         ("eight_basic", 0.30),
     ],
+}
+
+# EnergyLevel → 連続値（0–1）。VelocityMLP / articulation_layer で使う。
+# ENERGY_DECODE_PARAMS の onset_th（低いほど高密度）と対応させた値。
+# high=onset_th~0.22 → 0.85、low=onset_th~0.40 → 0.25 と線形に対応。
+ENERGY_FLOAT: dict[EnergyLevel, float] = {
+    "low": 0.25,
+    "mid": 0.55,
+    "high": 0.85,
 }
 
 # 低／中／高 → chord-peak デコード疎密（guitar）+ bass/drum onset しきい値
@@ -107,12 +126,18 @@ class FormSection:
     bars: int
     energy: EnergyLevel
     beat_type: str
+    technique_type: str
     progression: str
     label: str
 
     @property
     def decode_params(self) -> dict[str, float | int]:
         return dict(ENERGY_DECODE_PARAMS[self.energy])
+
+    @property
+    def energy_value(self) -> float:
+        """energy レベルを連続値 (0–1) で返す。VelocityMLP 等の入力に使う。"""
+        return ENERGY_FLOAT[self.energy]
 
 
 @dataclass(frozen=True)
@@ -128,7 +153,8 @@ class SongForm:
 
     def describe(self) -> str:
         parts = " → ".join(
-            f"{s.label}[{s.progression}|{s.beat_type}|{s.bars}]" for s in self.sections
+            f"{s.label}[{s.progression}|{s.beat_type}|{s.technique_type}|{s.bars}]"
+            for s in self.sections
         )
         return (
             f"{self.template_id} ({self.total_bars}bars, home={self.home_progression}): "
@@ -162,6 +188,15 @@ def pick_contrast(
 
 def _pick_beat_type(role: SectionRole, rng: random.Random | None) -> str:
     cands = ROLE_BEAT_CANDIDATES[role]
+    if rng is None:
+        return cands[0][0]
+    names = [c[0] for c in cands]
+    weights = [c[1] for c in cands]
+    return rng.choices(names, weights=weights, k=1)[0]
+
+
+def _pick_technique_type(role: SectionRole, rng: random.Random | None) -> str:
+    cands = ROLE_TECHNIQUE_CANDIDATES[role]
     if rng is None:
         return cands[0][0]
     names = [c[0] for c in cands]
@@ -212,6 +247,7 @@ def _section(
         bars=_bars_for_role(role),
         energy=ROLE_ENERGY[role],
         beat_type=_pick_beat_type(role, rng),
+        technique_type=_pick_technique_type(role, rng),
         progression=_pick_progression_for_role(
             role,
             occurrence=occurrence,

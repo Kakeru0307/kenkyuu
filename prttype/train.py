@@ -91,11 +91,13 @@ def train(
     onset_weight: float = 1.0,
     midbar_onset_bonus: float = 1.0,
     resume: Path | None = None,
+    transfer_from: Path | None = None,
     cvae: bool = False,
     latent_dim: int = DEFAULT_LATENT_DIM,
     beta: float = 1.0,
     kl_anneal_epochs: int = 10,
     require_power_cond: bool = False,
+    require_technique_cond: bool = False,
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -111,6 +113,7 @@ def train(
             input_dir,
             target_dir,
             require_power_cond=require_power_cond,
+            require_technique_cond=require_technique_cond,
         )
     print(f"学習パッチ数: {len(dataset)}")
     sample_input, _ = dataset[0]
@@ -134,6 +137,22 @@ def train(
         model.load_state_dict(checkpoint["model_state_dict"])
         prev_epochs = checkpoint.get("epochs", "?")
         print(f"再開: {resume} から重みを読み込み（前 epochs={prev_epochs}）")
+    elif transfer_from is not None:
+        old_ckpt = torch.load(transfer_from, map_location=device, weights_only=False)
+        old_state = old_ckpt["model_state_dict"]
+        new_state = model.state_dict()
+        transferred, skipped = 0, 0
+        for name, param in old_state.items():
+            if name in new_state and new_state[name].shape == param.shape:
+                new_state[name].copy_(param)
+                transferred += 1
+            else:
+                skipped += 1
+        model.load_state_dict(new_state)
+        print(
+            f"重み転送: {transfer_from} "
+            f"（転送 {transferred} 層 / スキップ {skipped} 層）"
+        )
     optimizer = optim.AdamW(model.parameters(), lr=lr)
 
     for epoch in range(1, epochs + 1):
@@ -256,6 +275,17 @@ def main() -> None:
         help="全inputに*_power.npyを必須化（13ch lead学習用）",
     )
     parser.add_argument(
+        "--require-technique-cond",
+        action="store_true",
+        help="全inputに*_technique.npyを必須化（technique条件付きlead学習用）",
+    )
+    parser.add_argument(
+        "--transfer-from",
+        type=Path,
+        default=None,
+        help="既存ckptから形状一致層だけ重みをコピーして学習開始（入力ch追加後の再学習用）",
+    )
+    parser.add_argument(
         "--cvae",
         action="store_true",
         help="確率的生成（条件付きVAE）で学習する。同じ入力から多様な出力を得る",
@@ -299,11 +329,13 @@ def main() -> None:
         onset_weight=args.onset_weight,
         midbar_onset_bonus=args.midbar_onset_bonus,
         resume=args.resume,
+        transfer_from=args.transfer_from,
         cvae=args.cvae,
         latent_dim=args.latent_dim,
         beta=args.beta,
         kl_anneal_epochs=args.kl_anneal_epochs,
         require_power_cond=args.require_power_cond,
+        require_technique_cond=args.require_technique_cond,
     )
 
 

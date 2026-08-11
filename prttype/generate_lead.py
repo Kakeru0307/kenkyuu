@@ -91,6 +91,7 @@ def generate_lead_music(
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
     model=None,
     device=None,
+    technique_type: str | None = None,
 ) -> muspy.Music:
     """進行からリードを生成し、muspy.Music を返す（ファイル保存なし）。"""
     spec = get_progression(progression)
@@ -134,6 +135,7 @@ def generate_lead_music(
                 bpm=float(bpm),
                 chord_peak_decode=not allow_power_chords,
                 blocked_power_onsets=blocked_power_onsets,
+                technique_type=technique_type,
             )
 
     music = patches_to_music(output_patches)

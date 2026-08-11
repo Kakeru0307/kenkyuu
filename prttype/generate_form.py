@@ -14,6 +14,7 @@ from typing import Any
 
 import muspy
 
+from articulation_layer import apply_articulation
 from generate_backing import DEFAULT_CHECKPOINT, DEFAULT_PRIOR_CHECKPOINT, generate_backing_music
 from generate_bass import DEFAULT_CHECKPOINT as DEFAULT_BASS_CHECKPOINT
 from generate_bass import generate_bass_music
@@ -149,6 +150,8 @@ def generate_form(
     temperature: float = 1.0,
     chord_peak_decode: bool = True,
     with_lead: bool = True,
+    velocity_model: object | None = None,
+    bend_model: object | None = None,
 ) -> Path:
     """構成テンプレに沿って 4 パートを連結し、1本の MIDI と form_manifest を保存する。"""
     bass_ckpt = Path(bass_checkpoint)
@@ -224,8 +227,18 @@ def generate_form(
                 blocked_power_onsets=blocked,
                 model=lead_model,
                 device=device,
+                technique_type=section.technique_type,
             )
             n_lead = sum(len(t.notes) for t in lead_part.tracks)
+            lead_part = apply_articulation(
+                lead_part,
+                section_energy=section.energy_value,
+                beat_type=section.beat_type,
+                technique_type=section.technique_type,
+                bpm=bpm,
+                velocity_model=velocity_model,
+                bend_model=bend_model,
+            )
             music = _shift_and_merge(music, lead_part, tick_offset=tick_offset)
 
         drum_part = generate_drum_music(

@@ -149,6 +149,34 @@ DRUM_TOM_FILLS = (
     DRUM_FLOOR_TOM_L,
 )
 
+# ギターテクニック種別カタログ。リード CVAE の条件 one-hot 次元順。
+# bend は velocity 幅で 3 段階に分割（Guitar-TECHS の velocity 分布から）。
+TECHNIQUE_TYPES = (
+    "normal",        # 0: 通常ピッキング
+    "soft_bend",     # 1: 浅いチョーキング（velocity 低め）
+    "normal_bend",   # 2: 標準チョーキング
+    "hard_bend",     # 3: 強いチョーキング（velocity 高め）
+    "vibrato",       # 4: ビブラート（長音符）
+    "palm_mute",     # 5: パームミュート（短音符・高 velocity）
+    "slide",         # 6: スライド（順次音程移動）
+    "hammer_on",     # 7: ハンマーオン / プルオフ（速い連続音）
+)
+
+N_TECHNIQUE_TYPES = len(TECHNIQUE_TYPES)
+_TECHNIQUE_INDEX: dict[str, int] = {t: i for i, t in enumerate(TECHNIQUE_TYPES)}
+
+
+def technique_type_to_id(technique_type: str) -> int:
+    """テクニック名 → インデックス（0-based）。"""
+    try:
+        return _TECHNIQUE_INDEX[technique_type]
+    except KeyError:
+        raise ValueError(
+            f"未知の technique_type: {technique_type!r}. "
+            f"有効: {list(TECHNIQUE_TYPES)}"
+        )
+
+
 # ドラム型カタログ（骨格固定・装飾のみ変動）。U-Net 条件 one-hot の次元順。
 BEAT_TYPES = (
     "eight_basic",

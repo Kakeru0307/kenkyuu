@@ -16,6 +16,7 @@ class PatchPairDataset(Dataset):
     """入力・正解の tonal パッチ (.npy) ペアを読み込む。
 
     同階層の ``*_cond.npy`` に正規化 BPM（スカラーまたは (1,H,W)）を置く。
+    ``*_technique.npy`` があれば technique one-hot マップ (N_TECHNIQUE_TYPES,H,W) を連結する。
     無い場合は中立 0.5（旧ペア互換・非推奨）。
     """
 
@@ -25,10 +26,12 @@ class PatchPairDataset(Dataset):
         target_dir: str | Path | None = None,
         *,
         require_power_cond: bool = False,
+        require_technique_cond: bool = False,
     ):
         self.input_dir = Path(input_dir)
         self.target_dir = Path(target_dir) if target_dir else self.input_dir
         self.require_power_cond = require_power_cond
+        self.require_technique_cond = require_technique_cond
         self.files = sorted(self.input_dir.rglob("*_tonal.npy"))
         if not self.files:
             raise FileNotFoundError(f"パッチが見つかりません: {self.input_dir}")
@@ -77,6 +80,32 @@ class PatchPairDataset(Dataset):
             f"!= {(height, width)}"
         )
 
+    def _load_technique_cond(
+        self,
+        input_path: Path,
+        height: int,
+        width: int,
+    ) -> np.ndarray | None:
+        tech_path = input_path.with_name(
+            input_path.name.replace("_tonal.npy", "_technique.npy")
+        )
+        if not tech_path.is_file():
+            if self.require_technique_cond:
+                raise FileNotFoundError(
+                    f"technique one-hot がありません。generate_lead_pairs を再実行してください: "
+                    f"{tech_path}"
+                )
+            return None
+        arr = np.asarray(np.load(tech_path), dtype=np.float32)
+        if arr.ndim == 2 and arr.shape == (height, width):
+            return arr.reshape(1, height, width)
+        if arr.ndim == 3 and arr.shape[1:] == (height, width):
+            return arr
+        raise ValueError(
+            f"technique cond shape mismatch: {tech_path} {arr.shape} "
+            f"!= (N, {height}, {width})"
+        )
+
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         input_path = self.files[idx]
         rel_path = input_path.relative_to(self.input_dir)
@@ -95,6 +124,11 @@ class PatchPairDataset(Dataset):
         )
         if power is not None:
             channels.append(power)
+        technique = self._load_technique_cond(
+            input_path, input_arr.shape[1], input_arr.shape[2]
+        )
+        if technique is not None:
+            channels.append(technique)
         model_in = np.concatenate(channels, axis=0)
 
         return (

@@ -1,6 +1,6 @@
 # 現状の課題と解決順序
 
-> 更新: 2026-07-18  
+> 更新: 2026-08-11  
 > 前提: 本線は **元 MIDI の改変** から **進行＋メロディによる生成** へ移行済み。  
 > **進捗:** 進行つき合成 6,000 本を再生成し、`generate_backing` / `generate_lead` / `generate_song`（backing+lead の2トラック統合）まで実装済み（Phase 1〜5 が一巡）。  
 > **現在の本線（2026-08-01）:** リード表現を先に改善。2小節モチーフ・可変音価・息継ぎ・一部power chordを学習し、その後ギターソロへ進む。
@@ -142,6 +142,64 @@ flowchart TB
 | TECHS の選別 | chords / music を厚く、単音練習を抑制 | H7 |
 | 検証分離 | P3_music 等を val に温存 | 評価全般 |
 | 和声ペナルティ | コード外音の追加重み（任意） | H5 の強化 |
+
+---
+
+## 3b. アーティキュレーション層の未解決課題（2026-08-11 追記）
+
+アーティキュレーション層（`articulation_layer.py` / `velocity_mlp.py`）の実装で確認された、現在未解決の設計上の限界。
+
+---
+
+### A-1. section_energy が velocity に学習できない
+
+**問題**  
+`section_energy`（イントロ=0.25 / Aメロ=0.55 / サビ=0.85）を VelocityMLP の入力に使いたいが、Guitar-TECHS はテクニック別の1本録音であり、「セクション」の概念が存在しない。  
+訓練データ生成時に `section_energy` をランダムにサンプリングすると velocity ターゲットと無相関になり、モデルは `section_energy` を無視することを学習してしまう。  
+後処理で定数倍するのもルールベースであり、AI ではない。
+
+**現在の対応**  
+`section_energy` を VelocityMLP の入力特徴量から削除。velocity はテクニック・ピッチ・音長だけから予測する（Guitar-TECHS で学べる範囲に限定）。
+
+**解決するには**  
+フルソング単位の velocity アノテーションデータ（サビは大きく・イントロは小さく、という対応が記録されているデータ）が必要。現時点では入手できていない。
+
+```
+必要なデータ形式:
+  (セクション種別 or energy float, 音符のpitch/duration/technique) → velocity
+  ※ Guitar-TECHS にはこの対応が存在しない
+```
+
+**関連ファイル**  
+`velocity_mlp.py` / `articulation_layer.py` / `train_velocity_mlp.py`
+
+---
+
+### A-2. TechniqueHead の学習データが合成のみ
+
+**問題**  
+TechniqueHead（テクニック分類）は Guitar-TECHS の統計から生成した **合成 pianoroll** で学習する。実際の演奏 pianoroll とは分布が異なる可能性がある。
+
+**現在の対応**  
+- 訓練データに velocity チャンネル（ch1）を追加し、palm_mute（vel高）と vibrato（vel低め）の区別をモデルに渡せるようにした  
+- CVAE 出力の velocity は全ノート 80 固定なので、推論時の ch1 はほぼ均一になる → テクニック分類精度は低下する可能性が残る
+
+**解決するには**  
+VelocityMLP で velocity を更新した後に TechniqueHead を再度呼ぶ（2パス推論）か、CVAE 自体が velocity を生成できるようにする。現時点では後者は大規模な改修が必要。
+
+---
+
+### A-3. Palm mute 検出は構造的に難しい
+
+**問題**  
+palm_mute の主な特徴は「高 velocity（平均 120.9）」だが、CVAE が出力する pianoroll の velocity は全ノート 80 固定。  
+TechniqueHead は ch1 の velocity を見てテクニックを分類するが、全ノートが同じ velocity では palm_mute と normal をほぼ区別できない。
+
+**現在の対応**  
+設計上の限界として受け入れている。実害は「palm_mute が normal に誤分類される」だけで、他のテクニックには影響しない。
+
+**解決するには**  
+A-2 と同じ（CVAE が velocity を出力できるか、または2パス推論）。
 
 ---
 

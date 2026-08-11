@@ -172,6 +172,83 @@ def save_music(music: muspy.Music, output_path: str | Path) -> None:
     muspy.write_midi(output_path, music)
 
 
+def save_music_with_bend(
+    music: muspy.Music,
+    output_path: str | Path,
+    ticks_per_beat: int = 480,
+) -> None:
+    """muspy.Music → mido MidiFile に変換し、pitch bend イベントを付加して保存する。
+
+    muspy の resolution（ticks/beat）から mido の ticks_per_beat に変換する。
+    pitch bend イベントは music._bend_events 属性（Phase 3 で付与）から読み出す。
+
+    Parameters
+    ----------
+    music:
+        muspy.Music。articulation_layer.apply_articulation() 適用済み。
+    output_path:
+        出力 MIDI ファイルパス。
+    ticks_per_beat:
+        mido の ticks_per_beat（標準 480）。
+    """
+    import mido
+
+    output_path = Path(output_path)
+    mid = mido.MidiFile(ticks_per_beat=ticks_per_beat)
+
+    muspy_resolution = music.resolution  # e.g. 4 ticks/beat
+    scale = ticks_per_beat / muspy_resolution
+
+    # pitch bend イベント: dict[(track_program, time_muspy)] → bend_value
+    bend_events: dict[tuple[int, int], int] = getattr(music, "_bend_events", {})
+
+    for track in music.tracks:
+        midi_track = mido.MidiTrack()
+        mid.tracks.append(midi_track)
+
+        # テンポ設定（最初のトラックのみ）
+        if len(mid.tracks) == 1:
+            tempo = mido.bpm2tempo(
+                music.tempos[0].qpm if music.tempos else 120.0
+            )
+            midi_track.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
+
+        # プログラムチェンジ
+        if not track.is_drum:
+            midi_track.append(
+                mido.Message("program_change", channel=0, program=track.program, time=0)
+            )
+
+        channel = 9 if track.is_drum else 0
+
+        # イベントリスト: (abs_tick_mido, mido_message)
+        events: list[tuple[int, object]] = []
+
+        for note in track.notes:
+            abs_on = int(note.time * scale)
+            abs_off = int((note.time + note.duration) * scale)
+            vel = int(np.clip(note.velocity, 1, 127))
+            events.append((abs_on, mido.Message("note_on", channel=channel, note=note.pitch, velocity=vel, time=0)))
+            events.append((abs_off, mido.Message("note_off", channel=channel, note=note.pitch, velocity=0, time=0)))
+
+            # pitch bend
+            key = (track.program, int(note.time))
+            if key in bend_events:
+                bend_val = int(np.clip(bend_events[key], -8192, 8191))
+                events.append((abs_on, mido.Message("pitchwheel", channel=channel, pitch=bend_val, time=0)))
+
+        events.sort(key=lambda e: e[0])
+
+        prev_tick = 0
+        for abs_tick, msg in events:
+            delta = abs_tick - prev_tick
+            msg.time = max(0, delta)
+            midi_track.append(msg)
+            prev_tick = abs_tick
+
+    mid.save(str(output_path))
+
+
 if __name__ == "__main__":
     from midi_to_patch import midi_to_patches
 

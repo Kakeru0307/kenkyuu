@@ -141,6 +141,19 @@ def _append_beat_cond(tensor: torch.Tensor, beat_type: str) -> torch.Tensor:
     return torch.cat([tensor, cond], dim=1)
 
 
+def _append_technique_cond(tensor: torch.Tensor, technique_type: str) -> torch.Tensor:
+    """(B,13,H,W) → (B,13+N_TECHNIQUE_TYPES,H,W)。technique one-hot を連結。"""
+    from dataset_lead import make_technique_onehot_map
+    from makeData.constants import technique_type_to_id
+
+    b, _, h, w = tensor.shape
+    tech_id = technique_type_to_id(technique_type)
+    onehot = make_technique_onehot_map(tech_id, height=h, width=w)
+    cond = torch.from_numpy(onehot).to(device=tensor.device, dtype=tensor.dtype)
+    cond = cond.unsqueeze(0).expand(b, -1, -1, -1)
+    return torch.cat([tensor, cond], dim=1)
+
+
 def _append_power_attack_cond(
     tensor: torch.Tensor,
     blocked_onsets: set[int] | frozenset[int] | None,
@@ -205,6 +218,7 @@ def predict_patches(
     peak_min_distance: int = 2,
     release_gap_ticks: int = 1,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
+    technique_type: str | None = None,
 ) -> list[MidiPatch]:
     if guitar_only and bass_only:
         raise ValueError("guitar_only と bass_only は同時に True にできません")
@@ -232,6 +246,8 @@ def predict_patches(
                         blocked_power_onsets,
                         patch_bar_index=patch.bar_index,
                     )
+                if model.in_channels > 13 and technique_type is not None:
+                    tensor = _append_technique_cond(tensor, technique_type)
                 output = model.sample(tensor, temperature=temperature)
             else:
                 if tensor.shape[1] == 11:
@@ -247,6 +263,8 @@ def predict_patches(
                             blocked_power_onsets,
                             patch_bar_index=patch.bar_index,
                         )
+                    if in_ch > 13 and technique_type is not None:
+                        tensor = _append_technique_cond(tensor, technique_type)
                     if tensor.shape[1] != in_ch:
                         raise ValueError(
                             f"model expects {in_ch} input channels, got {tensor.shape[1]}"

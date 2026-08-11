@@ -529,6 +529,7 @@ def generate_progression_lead(
     leap_prob: float = 0.15,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
     power_chord_phrase_probability: float = LEAD_POWER_CHORD_PHRASE_PROBABILITY,
+    duration_scale: float = 1.0,
 ) -> muspy.Music:
     """反復・変奏・息継ぎのある、進行スケール上の単音リードを生成する。
 
@@ -595,7 +596,9 @@ def generate_progression_lead(
             ):
                 continue
             note_index = max(0, min(len(scale) - 1, anchor + delta))
-            kept.append((pos, duration, note_index))
+            # duration_scale でテクニック別の音符長を調整（1以上を保証）
+            scaled_dur = max(1, int(round(duration * duration_scale)))
+            kept.append((pos, scaled_dur, note_index))
 
         if not kept:
             continue
