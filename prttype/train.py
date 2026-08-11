@@ -8,6 +8,7 @@ from pathlib import Path
 import torch
 from torch import optim
 
+from checkpoint_paths import part_ckpt_path, role_from_checkpoint_dir
 from dataset import PatchPairDataset, SinglePatchDataset, get_dataloader
 from model import DEFAULT_LATENT_DIM, build_cvae, build_unet
 from program_utils import GUITAR_PROGRAM
@@ -119,6 +120,8 @@ def train(
     dataloader = get_dataloader(dataset, batch_size=batch_size, shuffle=True)
     if cvae:
         model = build_cvae(
+            in_channels=input_channels,
+            out_channels=11,
             latent_dim=latent_dim, encoder_weights=encoder_weights
         ).to(device)
     else:
@@ -178,14 +181,16 @@ def train(
         else:
             print(f"epoch {epoch}/{epochs}  loss={avg_loss:.6f}")
 
-    ckpt_path = checkpoint_dir / "unet_last.pt"
+    role = role_from_checkpoint_dir(checkpoint_dir)
+    ckpt_path = part_ckpt_path(role, checkpoint_dir, cvae=cvae)
     payload = {
         "model_state_dict": model.state_dict(),
         "epochs": epochs,
         "lr": lr,
         "model_type": "cvae" if cvae else "unet",
-        "in_channels": input_channels if not cvae else 11,
+        "in_channels": input_channels,
         "out_channels": 11,
+        "role": role,
     }
     if cvae:
         payload["latent_dim"] = latent_dim

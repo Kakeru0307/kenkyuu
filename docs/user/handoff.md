@@ -26,8 +26,8 @@
 |------|------|
 | 製品前提 | ユーザーは進行を渡さない。学習データ／内部選択で決める |
 | MuseCoco | 試作後 **本線から除外**（「しんみり」→ tension/BPM140 等の不一致） |
-| 感情解析 | **WRIME** `MuneK/bert-large-japanese-v2-finetuned-wrime` を本線 |
-| 進行・BPM 選択 | カタログ RNG ではなく **synthetic manifest からサンプリング**（`learned_params.py`） |
+| 感情解析 | **WRIME** → **V/A**（Plutchik固定座標）。`emotion_va.py`。`emotion_clf`・4ラベルは廃止 |
+| 進行・BPM 選択 | structure prior（入力 WRIME8+VA2=10次元）。旧 in=12 ckpt は非互換 |
 | seed | テキストからの hash 廃止。`--seed` 任意、なしは真ランダム |
 | 生成入口 | `generate_from_prompt.py` → `prompt_to_params.py` → `generate_song` |
 
@@ -127,8 +127,9 @@
 
 | 項目 | 状態 |
 |------|------|
-| **長尺（〜3 分）生成** | 未。テンプレ Intro–Verse–Pre–Chorus… + 8 小節連結が次 |
-| **フォーム学習 C** | 未。セクション注釈コーパスが必要 |
+| **長尺（〜3 分）生成** | テンプレ A/B + `generate_form` で連結済み。品質は学習依存 |
+| **ベース / ドラム** | 合成・ペア・推論・form 統合済み。ドラムは **12型カタログ + beat_type 条件（in=24）**。`FormSection.beat_type` は構成レイヤで選択（将来 prior 学習で差し替え可）。**Colab 再学習待ち**（旧 in=12 drum ckpt 非互換） |
+| **フォーム学習 C** | 未。ただし v2 で区間進行ルール + `form_manifest` / `form_gate_server` による評価蓄積を開始。candidates が溜まったら prior 学習に差し替え |
 | **H9 ギターソロ** | 未着手（定義のみ） |
 | arpeggio / lead の音価多様化 | strum のみ多様化済み |
 | CVAE + 多様データ再学習 | CVAE コードあり。多様化データでの再学習は未 |
@@ -144,16 +145,18 @@
 
 ## Decisions（変えない前提）
 
-1. ユーザーは進行を指定しない。内部で manifest 等から選ぶ
+1. ユーザーは進行を指定しない。内部で prior 等から選ぶ
 2. 骨格は **downbeat_chord**（疎）。N・配置はモデルが創造
-3. MuseCoco 本線外。感情は WRIME
-4. 条件は **正規化 BPM 1ch**（11+1→11）。旧 in=11 ckpt 無効
+3. MuseCoco 本線外。感情は WRIME → V/A（固定座標）。emotion_clf / calm·tension 4ラベルは廃止
+4. prior 条件は **WRIME 8 + valence/arousal**（in=10）。旧 emotion_target one-hot ckpt は無効
 5. Stage2 通常不使用。拡散モデル不使用
 6. 15k は **force 入れ替え**（追記で旧 8 分ノリ混在させない）
 7. 長尺・曲構成は U-Net 外。3 分を U-Net 一発学習しない
 8. H2 は **損失分離（案1）** が第一候補
 9. BPM 拡張は定数だけでなく正規化・感情帯・N 帯・**再合成**セット
 10. **学習効率**: 基本 15k + in=12 を **v1 土台 ckpt** として一度フル学習。以降の改善は **差分データ + fine-tune**（フル再学習を毎回しない）
+11. U-Net 条件は **正規化 BPM 1ch**（tonal11+1→11）。旧 in=11 U-Net ckpt 無効
+12. **ドラム型**: 12 型カタログ + one-hot 条件（in=24）。選定は構成レイヤ `FormSection.beat_type`（`ROLE_BEAT_CANDIDATES`）。将来 prior 学習で差し替え可。旧 energy 密度 drum / in=12 ckpt 非互換
 
 ---
 
@@ -232,9 +235,9 @@ v3_delta: さらなる差分 → 前版 ckpt から fine-tune
 | パス | 役割 |
 |------|------|
 | `prttype/generate_from_prompt.py` | テキスト → MIDI 入口 |
-| `prttype/prompt_to_params.py` | WRIME → manifest 選択 |
-| `prttype/learned_params.py` | manifest サンプリング |
-| `prttype/density_cond.py` | BPM 条件 ch |
+| `prttype/emotion_va.py` | WRIME → V/A |
+| `prttype/sample_structure_params.py` | 文 → prior / カタログ |
+| `prttype/structure_prior.py` | prior ネット（in=10） |
 | `prttype/makeData/rhythm.py` | 合成 BPM↔N |
 | `prttype/makeData/patterns.py` | N×placement×articulation |
 | `prttype/model.py` / `train.py` / `inference.py` | U-Net in=12 |

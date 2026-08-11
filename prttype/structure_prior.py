@@ -1,7 +1,7 @@
-"""Structure prior: WRIME emotion vector → musical structure params.
+"""Structure prior: WRIME + V/A → musical structure params.
 
 Trained on gated prior_pairs accept rows. Inference for the final pipeline
-(文 → WRIME → prior → backing/lead).
+(文 → WRIME → V/A → prior → backing/lead).
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+
+from emotion_va import wrime_to_va
 
 WRIME_KEYS: tuple[str, ...] = (
     "joy",
@@ -24,7 +26,8 @@ WRIME_KEYS: tuple[str, ...] = (
     "trust",
 )
 
-EMOTION_TARGETS: tuple[str, ...] = ("joy", "sadness", "calm", "tension")
+# WRIME 8 + valence + arousal
+FEATURE_DIM = len(WRIME_KEYS) + 2
 
 PROGRESSIONS: tuple[str, ...] = (
     "marusa",
@@ -84,7 +87,6 @@ BARS_PER_CHORD: tuple[int, ...] = (1, 2)
 BPM_LO = 60.0
 BPM_HI = 150.0
 
-# family lookup for decoded progression (coarse; matches catalog)
 _PROGRESSION_FAMILY: dict[str, str] = {
     **{
         n: "diatonic_major"
@@ -120,13 +122,6 @@ def wrime_to_vec(wrime: dict[str, float] | None) -> list[float]:
     return [float(w.get(k, 0.0)) for k in WRIME_KEYS]
 
 
-def emotion_target_to_vec(label: str | None) -> list[float]:
-    out = [0.0] * len(EMOTION_TARGETS)
-    if label in EMOTION_TARGETS:
-        out[EMOTION_TARGETS.index(label)] = 1.0
-    return out
-
-
 def bpm_to_unit(bpm: float) -> float:
     return max(0.0, min(1.0, (float(bpm) - BPM_LO) / (BPM_HI - BPM_LO)))
 
@@ -135,26 +130,34 @@ def unit_to_bpm(u: float) -> float:
     return BPM_LO + float(u) * (BPM_HI - BPM_LO)
 
 
-def feature_dim(*, use_emotion_target: bool = True) -> int:
-    return len(WRIME_KEYS) + (len(EMOTION_TARGETS) if use_emotion_target else 0)
+def feature_dim() -> int:
+    return FEATURE_DIM
+
+
+def _resolve_va(
+    *,
+    wrime: dict[str, float] | None,
+    va: tuple[float, float] | None,
+) -> tuple[float, float]:
+    if va is not None:
+        return float(va[0]), float(va[1])
+    return wrime_to_va(wrime)
 
 
 def encode_features(
     *,
     wrime: dict[str, float] | None,
-    emotion_target: str | None = None,
-    use_emotion_target: bool = True,
+    va: tuple[float, float] | None = None,
 ) -> list[float]:
-    feats = wrime_to_vec(wrime)
-    if use_emotion_target:
-        feats = feats + emotion_target_to_vec(emotion_target)
-    return feats
+    """WRIME 8スコア + Valence/Arousal → 10次元特徴。"""
+    v, a = _resolve_va(wrime=wrime, va=va)
+    return wrime_to_vec(wrime) + [v, a]
 
 
 class StructurePriorNet(nn.Module):
     def __init__(
         self,
-        in_dim: int,
+        in_dim: int = FEATURE_DIM,
         *,
         hidden: int = 64,
         n_prog: int = len(PROGRESSIONS),
@@ -216,7 +219,6 @@ def decode_outputs(
 
     bpm_mean = float(torch.sigmoid(out["bpm"].reshape(-1)[index]).item())
     if sample:
-        # unit-space noise; scale with temperature
         noise_t = torch.randn((), generator=generator)
         noise = float(noise_t.item()) * (0.05 * temp)
         bpm_u = max(0.0, min(1.0, bpm_mean + noise))
@@ -250,8 +252,13 @@ def load_prior(
     path = Path(ckpt_path)
     blob = torch.load(path, map_location="cpu", weights_only=False)
     meta = blob.get("meta") or {}
-    use_et = bool(meta.get("use_emotion_target", True))
-    in_dim = int(meta.get("in_dim", feature_dim(use_emotion_target=use_et)))
+    in_dim = int(meta.get("in_dim", FEATURE_DIM))
+    if in_dim != FEATURE_DIM:
+        raise RuntimeError(
+            f"structure prior checkpoint の in_dim={in_dim} は非互換です "
+            f"（期待値={FEATURE_DIM}: WRIME8+VA2）。"
+            " train_structure_prior.py で再学習してください。"
+        )
     hidden = int(meta.get("hidden", 64))
     model = StructurePriorNet(in_dim, hidden=hidden)
     model.load_state_dict(blob["model_state_dict"])
@@ -266,19 +273,14 @@ def predict_structure(
     model: StructurePriorNet,
     *,
     wrime: dict[str, float] | None,
-    emotion_target: str | None = None,
-    use_emotion_target: bool = True,
+    va: tuple[float, float] | None = None,
     bars: int = 8,
     device: str | torch.device | None = None,
     sample: bool = True,
     temperature: float = 1.0,
     seed: int | None = None,
 ) -> StructurePriorOut:
-    feats = encode_features(
-        wrime=wrime,
-        emotion_target=emotion_target,
-        use_emotion_target=use_emotion_target,
-    )
+    feats = encode_features(wrime=wrime, va=va)
     x = torch.tensor([feats], dtype=torch.float32)
     if device is not None:
         x = x.to(device)

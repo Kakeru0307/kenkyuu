@@ -21,6 +21,7 @@ from typing import Any
 
 import muspy
 
+from checkpoint_paths import resolve_part_checkpoint, resolve_structure_prior_checkpoint
 from inference import (
     MIDI_DIR,
     export_guitar_music,
@@ -41,8 +42,8 @@ from makeData.progressions import resolve_progression_chords
 from sample_structure_params import resolve_structure_params
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_CHECKPOINT = SCRIPT_DIR / "checkpoints" / "backing" / "unet_last.pt"
-DEFAULT_PRIOR_CHECKPOINT = SCRIPT_DIR / "checkpoints" / "prior" / "prior_last.pt"
+DEFAULT_CHECKPOINT = resolve_part_checkpoint("backing")
+DEFAULT_PRIOR_CHECKPOINT = resolve_structure_prior_checkpoint()
 
 
 def _apply_tempo(music: muspy.Music, bpm: float) -> muspy.Music:

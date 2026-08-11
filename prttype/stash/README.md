@@ -10,7 +10,7 @@
 
 | フォルダ | 内容 |
 |---|---|
-| `scripts/` | 旧検証・可視化スクリプト |
+| `scripts/` | 旧検証・可視化スクリプト / 廃止した `train_emotion_classifier.py` |
 | `prompt_legacy/` | 文→簡易ルール／manifest 選択の実験入口（最終形ではない） |
 | `midi_legacy/` | test1 系の入出力 MIDI（元 MIDI 改変時代） |
 | `data_legacy/` | 往復変換結果・旧 patches・Colab 試生成 MIDI |

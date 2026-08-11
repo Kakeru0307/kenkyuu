@@ -1,7 +1,7 @@
 """生成時の構造パラメータ（進行・キー・BPM・energy）。
 
-最終形: 文 → WRIME → structure prior。
-prior チェックポイントが無い／文が無い／感情が na の場合のみ、カタログ乱択にフォールバックする。
+最終形: 文 → WRIME → V/A → structure prior。
+prior チェックポイントが無い／文が無い場合のみ、カタログ乱択にフォールバックする。
 """
 
 from __future__ import annotations
@@ -10,11 +10,12 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
+from checkpoint_paths import resolve_structure_prior_checkpoint
 from makeData.constants import BPM_RANGE, KEYS
 from makeData.progressions import PROGRESSIONS, ProgressionSpec
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_PRIOR_CKPT = SCRIPT_DIR / "checkpoints" / "prior" / "prior_last.pt"
+DEFAULT_PRIOR_CKPT = resolve_structure_prior_checkpoint()
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,7 @@ class StructureParams:
     mode: str = ""
     energy: str = ""
     source: str = "catalog"  # catalog | prior
-    emotion_target: str = ""
+    va: tuple[float, float] = (0.0, 0.0)
 
 
 def sample_structure_params(*, seed: int | None = None) -> StructureParams:
@@ -53,6 +54,7 @@ def sample_structure_params(*, seed: int | None = None) -> StructureParams:
         mode=spec.mode,
         energy=energy,
         source="catalog",
+        va=(0.0, 0.0),
     )
 
 
@@ -60,7 +62,7 @@ def structure_from_prior(
     *,
     text: str | None = None,
     wrime: dict[str, float] | None = None,
-    emotion_target: str | None = None,
+    va: tuple[float, float] | None = None,
     prior_checkpoint: Path | None = DEFAULT_PRIOR_CKPT,
     bars: int = 8,
     device: str | None = None,
@@ -68,45 +70,32 @@ def structure_from_prior(
     temperature: float = 1.0,
     seed: int | None = None,
 ) -> StructureParams:
-    """WRIME（または文）から structure prior で構造を推論する。
+    """WRIME（または文）から V/A を得て structure prior で構造を推論する。
 
     既定は分布からサンプル（同じ文でも seed が違えば別テイク）。
     sample=False で argmax（決定的）。
-    emotion_target が na（判定不能）のときは ValueError（呼び出し側でカタログへ）。
     """
-    from structure_prior import EMOTION_TARGETS, load_prior, predict_structure
-    from wrime_emotion import analyze_emotion, wrime_to_music_emotion
+    from emotion_va import analyze_emotion, wrime_to_va
+    from structure_prior import load_prior, predict_structure
 
     ckpt = prior_checkpoint or DEFAULT_PRIOR_CKPT
     if not Path(ckpt).is_file():
         raise FileNotFoundError(f"structure prior checkpoint がありません: {ckpt}")
 
     scores = wrime
-    label = emotion_target
     if scores is None:
         if not text:
             raise ValueError("text または wrime が必要です")
         w = analyze_emotion(text)
         scores = dict(w.scores)
 
-    if label is None:
-        mapped = wrime_to_music_emotion(scores)
-        if mapped == "na":
-            raise ValueError("emotion_target unresolved (na)")
-        label = mapped
-    elif label == "na":
-        raise ValueError("emotion_target unresolved (na)")
-    elif label not in EMOTION_TARGETS:
-        raise ValueError(f"unknown emotion_target: {label}")
+    resolved_va = va if va is not None else wrime_to_va(scores)
 
-    model, blob = load_prior(ckpt, device=device)
-    meta = blob.get("meta") or {}
-    use_et = bool(meta.get("use_emotion_target", True))
+    model, _blob = load_prior(ckpt, device=device)
     pred = predict_structure(
         model,
         wrime=scores,
-        emotion_target=label,
-        use_emotion_target=use_et,
+        va=resolved_va,
         bars=bars,
         device=device,
         sample=sample,
@@ -123,37 +112,31 @@ def structure_from_prior(
         mode=pred.mode,
         energy=pred.energy,
         source="prior",
-        emotion_target=label,
+        va=resolved_va,
     )
 
 
 def resolve_structure_params(
     *,
     text: str | None = None,
-    emotion_target: str | None = None,
     wrime: dict[str, float] | None = None,
+    va: tuple[float, float] | None = None,
     prior_checkpoint: Path | None = DEFAULT_PRIOR_CKPT,
     seed: int | None = None,
     prefer_prior: bool = True,
     sample: bool = True,
     temperature: float = 1.0,
 ) -> StructureParams:
-    """文があれば prior、無ければカタログ乱択。prior 欠落／感情 na 時はカタログへ落とす。"""
+    """文があれば prior、無ければカタログ乱択。prior 欠落時はカタログへ落とす。"""
     ckpt = Path(prior_checkpoint) if prior_checkpoint else DEFAULT_PRIOR_CKPT
-    if prefer_prior and (text or wrime) and ckpt.is_file():
-        try:
-            return structure_from_prior(
-                text=text,
-                wrime=wrime,
-                emotion_target=emotion_target,
-                prior_checkpoint=ckpt,
-                sample=sample,
-                temperature=temperature,
-                seed=seed,
-            )
-        except ValueError as exc:
-            if "unresolved (na)" in str(exc):
-                print("[structure] emotion unresolved (na) → catalog fallback")
-                return sample_structure_params(seed=seed)
-            raise
+    if prefer_prior and (text or wrime or va is not None) and ckpt.is_file():
+        return structure_from_prior(
+            text=text,
+            wrime=wrime,
+            va=va,
+            prior_checkpoint=ckpt,
+            sample=sample,
+            temperature=temperature,
+            seed=seed,
+        )
     return sample_structure_params(seed=seed)

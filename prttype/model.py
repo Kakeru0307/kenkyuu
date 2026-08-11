@@ -65,26 +65,33 @@ class CVAEUNet(nn.Module):
 
     - 学習時: q(z|x,y) から z をサンプリングし、decoder(x, z) で再構成。
     - 推論時: z ~ N(0, I) をサンプリングするため、同じ x でも出力が変わる。
+
+    in_channels と out_channels を独立させることで非対称 ch 構成に対応。
+      例: backing in=12(tonal+BPM), out=11 / drum in=24, out=1
+    PosteriorEncoder: cat(x, y) = in_channels + out_channels
+    Decoder:          cat(x, z) = in_channels + latent_dim → out_channels
     """
 
     def __init__(
         self,
-        channels: int = 11,
+        in_channels: int = 11,
+        out_channels: int = 11,
         latent_dim: int = DEFAULT_LATENT_DIM,
         encoder: str = DEFAULT_ENCODER,
         encoder_weights: str | None = None,
     ) -> None:
         super().__init__()
-        self.channels = channels
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.latent_dim = latent_dim
         self.posterior = PosteriorEncoder(
-            in_channels=channels * 2, latent_dim=latent_dim
+            in_channels=in_channels + out_channels, latent_dim=latent_dim
         )
         self.decoder = smp.Unet(
             encoder_name=encoder,
             encoder_weights=encoder_weights,
-            in_channels=channels + latent_dim,
-            classes=channels,
+            in_channels=in_channels + latent_dim,
+            classes=out_channels,
             activation=None,
         )
 
@@ -123,13 +130,15 @@ class CVAEUNet(nn.Module):
 
 
 def build_cvae(
-    channels: int = 11,
+    in_channels: int = 11,
+    out_channels: int = 11,
     latent_dim: int = DEFAULT_LATENT_DIM,
     encoder: str = DEFAULT_ENCODER,
     encoder_weights: str | None = None,
 ) -> CVAEUNet:
     return CVAEUNet(
-        channels=channels,
+        in_channels=in_channels,
+        out_channels=out_channels,
         latent_dim=latent_dim,
         encoder=encoder,
         encoder_weights=encoder_weights,

@@ -9,6 +9,7 @@ import muspy
 import numpy as np
 import torch
 
+from checkpoint_paths import resolve_part_checkpoint
 from midi_to_patch import (
     MidiPatch,
     TICKS_PER_BAR,
@@ -23,6 +24,7 @@ from model import CVAEUNet, build_cvae, build_unet
 from patch_to_midi import patches_to_music, save_music
 from skeleton import PAIR_MODES, make_input_tonal
 from density_cond import midi_tempo_bpm
+from makeData.constants import BASS_PITCH_MAX, BASS_PITCH_MIN, BASS_PROGRAM
 from program_utils import (
     GUITAR_OVERDRIVE_PROGRAM,
     GUITAR_PITCH_MAX,
@@ -35,6 +37,7 @@ from program_utils import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 MIDI_DIR = SCRIPT_DIR / "midi"
 GUITAR_CATEGORY = GUITAR_PROGRAM // 8
+BASS_CATEGORY = BASS_PROGRAM // 8
 INFERENCE_MODES = PAIR_MODES + ("full",)
 
 
@@ -98,8 +101,12 @@ def _infer_in_channels(state_dict: dict) -> int | None:
 def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state = checkpoint["model_state_dict"]
-    if checkpoint.get("model_type") == "cvae":
-        model = build_cvae(latent_dim=checkpoint.get("latent_dim", 16))
+    if checkpoint.get("model_type") in ("cvae", "cvae_drum"):
+        model = build_cvae(
+            in_channels=int(checkpoint.get("in_channels", 11)),
+            out_channels=int(checkpoint.get("out_channels", 11)),
+            latent_dim=int(checkpoint.get("latent_dim", 16)),
+        )
     else:
         inferred = _infer_in_channels(state)
         in_ch = int(checkpoint.get("in_channels", inferred or 11))
@@ -118,6 +125,19 @@ def _append_bpm_cond(tensor: torch.Tensor, bpm: float) -> torch.Tensor:
     b, _, h, w = tensor.shape
     unit = float(bpm_to_unit(bpm))
     cond = tensor.new_full((b, 1, h, w), unit)
+    return torch.cat([tensor, cond], dim=1)
+
+
+def _append_beat_cond(tensor: torch.Tensor, beat_type: str) -> torch.Tensor:
+    """(B,12,H,W) → (B,24,H,W)。beat_type one-hot 定数マップを連結。"""
+    from dataset_drum import make_beat_onehot_map
+    from makeData.drum import beat_type_to_id
+
+    b, _, h, w = tensor.shape
+    beat_id = beat_type_to_id(beat_type)
+    onehot = make_beat_onehot_map(beat_id, height=h, width=w)
+    cond = torch.from_numpy(onehot).to(device=tensor.device, dtype=tensor.dtype)
+    cond = cond.unsqueeze(0).expand(b, -1, -1, -1)
     return torch.cat([tensor, cond], dim=1)
 
 
@@ -175,6 +195,7 @@ def predict_patches(
     *,
     input_mode: str = "onset_to_full",
     guitar_only: bool = True,
+    bass_only: bool = False,
     onset_th: float = 0.3,
     sustain_th: float = 0.85,
     seed: int | None = None,
@@ -185,6 +206,9 @@ def predict_patches(
     release_gap_ticks: int = 1,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
 ) -> list[MidiPatch]:
+    if guitar_only and bass_only:
+        raise ValueError("guitar_only と bass_only は同時に True にできません")
+
     is_cvae = isinstance(model, CVAEUNet)
     if is_cvae and seed is not None:
         torch.manual_seed(seed)
@@ -199,32 +223,44 @@ def predict_patches(
                 model_input = make_input_tonal(source_tonal, input_mode)
 
             tensor = torch.from_numpy(normalize_pianoroll(model_input)).unsqueeze(0).to(device)
-            if not is_cvae and tensor.shape[1] == 11:
-                try:
-                    in_ch = int(model.encoder.conv1.in_channels)  # type: ignore[attr-defined]
-                except Exception:
-                    in_ch = 11
-                if in_ch >= 12:
+            if is_cvae:
+                if model.in_channels >= 12:
                     tensor = _append_bpm_cond(tensor, bpm)
-                if in_ch >= 13:
+                if model.in_channels >= 13:
                     tensor = _append_power_attack_cond(
                         tensor,
                         blocked_power_onsets,
                         patch_bar_index=patch.bar_index,
                     )
-                if tensor.shape[1] != in_ch:
-                    raise ValueError(
-                        f"model expects {in_ch} input channels, got {tensor.shape[1]}"
-                    )
-            if is_cvae:
                 output = model.sample(tensor, temperature=temperature)
             else:
+                if tensor.shape[1] == 11:
+                    try:
+                        in_ch = int(model.encoder.conv1.in_channels)  # type: ignore[attr-defined]
+                    except Exception:
+                        in_ch = 11
+                    if in_ch >= 12:
+                        tensor = _append_bpm_cond(tensor, bpm)
+                    if in_ch >= 13:
+                        tensor = _append_power_attack_cond(
+                            tensor,
+                            blocked_power_onsets,
+                            patch_bar_index=patch.bar_index,
+                        )
+                    if tensor.shape[1] != in_ch:
+                        raise ValueError(
+                            f"model expects {in_ch} input channels, got {tensor.shape[1]}"
+                        )
                 output = model(tensor)
             output = output.squeeze(0).cpu().numpy()
 
             if guitar_only:
                 masked = np.zeros_like(output)
                 masked[GUITAR_CATEGORY] = output[GUITAR_CATEGORY]
+                output = masked
+            elif bass_only:
+                masked = np.zeros_like(output)
+                masked[BASS_CATEGORY] = output[BASS_CATEGORY]
                 output = masked
 
             if guitar_only and input_mode == "onset_to_full":
@@ -247,11 +283,73 @@ def predict_patches(
                     )
                 if guitar_only:
                     output_chw = postprocess_guitar_free(output_chw)
+                elif bass_only:
+                    output_chw = filter_pitch_range_chw(
+                        output_chw,
+                        pitch_min=BASS_PITCH_MIN,
+                        pitch_max=BASS_PITCH_MAX,
+                    )
+                    bass_masked = np.zeros_like(output_chw)
+                    bass_masked[BASS_CATEGORY] = output_chw[BASS_CATEGORY]
+                    output_chw = bass_masked
 
             predicted.append(
                 MidiPatch(
                     tonal=output_chw.transpose(1, 2, 0),
                     drum=np.zeros_like(patch.drum),
+                    bar_index=patch.bar_index,
+                )
+            )
+    return predicted
+
+
+def predict_drum_patches(
+    model: torch.nn.Module,
+    patches: list[MidiPatch],
+    device: torch.device,
+    *,
+    input_mode: str = "downbeat_chord",
+    onset_th: float = 0.35,
+    bpm: float = 120.0,
+    beat_type: str = "eight_basic",
+    temperature: float = 1.0,
+) -> list[MidiPatch]:
+    """drum U-Net 推論。out (1,H,W) → drum_chw。tonal はゼロ。
+
+    入力は tonal11 + BPM1 + beat_onehot12 = 24ch（旧 12ch ckpt は非互換）。
+    CVAE ckpt の場合は model.sample() を呼ぶため同じ入力でも毎回出力が変わる。
+    """
+    is_cvae = isinstance(model, CVAEUNet)
+    predicted: list[MidiPatch] = []
+    with torch.no_grad():
+        for patch in patches:
+            source_tonal = patch.tonal_chw
+            if input_mode == "full":
+                model_input = source_tonal
+            else:
+                model_input = make_input_tonal(source_tonal, input_mode)
+
+            tensor = torch.from_numpy(normalize_pianoroll(model_input)).unsqueeze(0).to(device)
+            if tensor.shape[1] == 11:
+                tensor = _append_bpm_cond(tensor, bpm)
+            if tensor.shape[1] == 12:
+                tensor = _append_beat_cond(tensor, beat_type)
+
+            if is_cvae:
+                logits = model.sample(tensor, temperature=temperature)
+            else:
+                logits = model(tensor)
+            prob = torch.sigmoid(logits).squeeze(0).cpu().numpy()  # (1,H,W)
+            if prob.ndim == 2:
+                prob = prob[np.newaxis, ...]
+            drum = (prob[0] >= onset_th).astype(np.float32)  # (H,W)
+            drum_int = (drum > 0).astype(np.int32)
+
+            zeros_tonal = np.zeros_like(source_tonal)
+            predicted.append(
+                MidiPatch(
+                    tonal=zeros_tonal.transpose(1, 2, 0),
+                    drum=drum_int,
                     bar_index=patch.bar_index,
                 )
             )
@@ -321,7 +419,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=SCRIPT_DIR / "checkpoints" / "backing" / "unet_last.pt",
+        default=resolve_part_checkpoint("backing"),
     )
     parser.add_argument(
         "--output",

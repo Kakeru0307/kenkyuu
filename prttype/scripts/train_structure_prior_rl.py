@@ -9,8 +9,8 @@ where π_ref is a frozen copy of the supervised init, and
 
   python scripts/train_structure_prior_rl.py \\
     --jsonl data/prior_pairs/manifests/candidates.jsonl \\
-    --init-checkpoint checkpoints/prior/prior_supervised_last.pt \\
-    --checkpoint-dir checkpoints/prior \\
+    --init-checkpoint checkpoints/structure_prior/prior_supervised_last.pt \\
+    --checkpoint-dir checkpoints/structure_prior \\
     --rounds 10
 """
 
@@ -36,6 +36,7 @@ if ROOT.name == "scripts":
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from emotion_va import wrime_to_va  # noqa: E402
 from structure_prior import (  # noqa: E402
     BARS_PER_CHORD,
     BPM_HI,
@@ -53,6 +54,21 @@ from structure_prior import (  # noqa: E402
 )
 
 BPM_STD = 0.08
+
+
+def row_va(row: dict[str, Any]) -> tuple[float, float]:
+    va = row.get("va")
+    if isinstance(va, dict):
+        return float(va.get("valence", 0.0)), float(va.get("arousal", 0.0))
+    if isinstance(va, (list, tuple)) and len(va) >= 2:
+        return float(va[0]), float(va[1])
+    return wrime_to_va(row.get("emotion_wrime"))
+
+
+def va_quadrant(v: float, a: float) -> str:
+    hv = "pos" if v >= 0 else "neg"
+    ha = "high" if a >= 0 else "low"
+    return f"{hv}_{ha}"
 
 
 def gate_reward(row: dict[str, Any]) -> float | None:
@@ -91,9 +107,8 @@ def load_gated_rows(path: Path) -> list[dict[str, Any]]:
 
 
 class OfflineRLDataset(Dataset):
-    def __init__(self, rows: list[dict[str, Any]], *, use_emotion_target: bool = True) -> None:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
-        self.use_emotion_target = use_emotion_target
         self.prog_i = {n: i for i, n in enumerate(PROGRESSIONS)}
         self.key_i = {n: i for i, n in enumerate(KEYS)}
         self.mode_i = {n: i for i, n in enumerate(MODES)}
@@ -116,11 +131,7 @@ class OfflineRLDataset(Dataset):
         bpc = int(st.get("bars_per_chord") or 1)
         if bpc not in self.bpc_i:
             bpc = 1 if bpc < 2 else 2
-        x = encode_features(
-            wrime=row.get("emotion_wrime"),
-            emotion_target=row.get("emotion_target") or row.get("emotion_label"),
-            use_emotion_target=self.use_emotion_target,
-        )
+        x = encode_features(wrime=row.get("emotion_wrime"), va=row_va(row))
         return {
             "x": torch.tensor(x, dtype=torch.float32),
             "bpm": torch.tensor(bpm_to_unit(float(st["bpm"])), dtype=torch.float32),
@@ -206,26 +217,24 @@ def main() -> None:
     parser.add_argument(
         "--init-checkpoint",
         type=Path,
-        default=ROOT / "checkpoints" / "prior" / "prior_supervised_last.pt",
+        default=ROOT / "checkpoints" / "structure_prior" / "prior_supervised_last.pt",
     )
-    parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "prior")
+    parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "structure_prior")
     parser.add_argument("--rounds", type=int, default=10)
     parser.add_argument("--epochs-per-round", type=int, default=15)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--kl-beta", type=float, default=0.5, help="KL(π||π_ref) weight")
     parser.add_argument("--seed", type=int, default=3)
-    parser.add_argument("--no-emotion-target", action="store_true")
     args = parser.parse_args()
 
-    use_et = not args.no_emotion_target
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
     jsonl = args.jsonl if args.jsonl.is_absolute() else (ROOT / args.jsonl)
     init_ckpt = args.init_checkpoint if args.init_checkpoint.is_absolute() else (ROOT / args.init_checkpoint)
     if not init_ckpt.is_file():
-        alt = ROOT / "checkpoints" / "prior" / "prior_last.pt"
+        alt = ROOT / "checkpoints" / "structure_prior" / "structure_prior_last.pt"
         if alt.is_file():
             init_ckpt = alt
     ckpt_dir = args.checkpoint_dir if args.checkpoint_dir.is_absolute() else (ROOT / args.checkpoint_dir)
@@ -236,7 +245,7 @@ def main() -> None:
     print("reward", dict(Counter(round(x, 2) for x in (r["_reward"] for r in rows))))
     print("status", dict(Counter((r.get("gate") or {}).get("status") for r in rows)))
 
-    ds = OfflineRLDataset(rows, use_emotion_target=use_et)
+    ds = OfflineRLDataset(rows)
     loader = DataLoader(ds, batch_size=min(args.batch_size, len(ds)), shuffle=True)
     eval_loader = DataLoader(ds, batch_size=min(args.batch_size, len(ds)), shuffle=False)
 
@@ -246,7 +255,6 @@ def main() -> None:
 
     model, blob = load_prior(init_ckpt, device=device)
     meta = blob.get("meta") or {}
-    use_et = bool(meta.get("use_emotion_target", use_et))
     print(f"init from {init_ckpt}")
 
     # frozen reference policy (supervised)
@@ -321,9 +329,9 @@ def main() -> None:
             "model_state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
             "meta": {
                 **meta,
-                "in_dim": int(meta.get("in_dim", feature_dim(use_emotion_target=use_et))),
+                "in_dim": int(meta.get("in_dim", feature_dim())),
                 "hidden": int(meta.get("hidden", 64)),
-                "use_emotion_target": use_et,
+                "feature": "wrime8+va2",
                 "train_mode": "offline_rl_reinforce_kl",
                 "round": rnd,
                 "rounds": args.rounds,
@@ -352,9 +360,9 @@ def main() -> None:
         "model_state_dict": best_state,
         "meta": {
             **meta,
-            "in_dim": int(meta.get("in_dim", feature_dim(use_emotion_target=use_et))),
+            "in_dim": int(meta.get("in_dim", feature_dim())),
             "hidden": int(meta.get("hidden", 64)),
-            "use_emotion_target": use_et,
+            "feature": "wrime8+va2",
             "train_mode": "offline_rl_reinforce_kl",
             "selected": "best_gap_with_acc_guard",
             "best_gap_logp": best_gap,
@@ -373,7 +381,7 @@ def main() -> None:
     torch.save(final_blob, final_path)
 
     supervised = ckpt_dir / "prior_supervised_last.pt"
-    prior_last = ckpt_dir / "prior_last.pt"
+    prior_last = ckpt_dir / "structure_prior_last.pt"
     if prior_last.is_file() and not supervised.is_file():
         shutil.copy2(prior_last, supervised)
     shutil.copy2(final_path, prior_last)
@@ -397,22 +405,22 @@ def main() -> None:
     for row in rows:
         if row["_reward"] <= 0:
             continue
-        lab = row.get("emotion_target") or "?"
+        v, a = row_va(row)
+        lab = va_quadrant(v, a)
         if lab in shown:
             continue
         shown.add(lab)
         pred = predict_structure(
             model,
             wrime=row.get("emotion_wrime"),
-            emotion_target=row.get("emotion_target"),
-            use_emotion_target=use_et,
+            va=(v, a),
             device=device,
         )
         gold = row["structure"]
         print(
-            f"sample[{lab}] pred bpm={pred.bpm} energy={pred.energy} mode={pred.mode} "
-            f"prog={pred.progression} | gold bpm={gold['bpm']} energy={gold.get('energy')} "
-            f"prog={gold['progression']}"
+            f"sample[{lab} V={v:+.2f} A={a:+.2f}] pred bpm={pred.bpm} energy={pred.energy} "
+            f"mode={pred.mode} prog={pred.progression} | gold bpm={gold['bpm']} "
+            f"energy={gold.get('energy')} prog={gold['progression']}"
         )
 
 

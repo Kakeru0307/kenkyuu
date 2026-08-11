@@ -5,6 +5,8 @@
 
 --append で既存を消さず追記。ID は既存最大の次から。
 --split で accept.jsonl / reject.jsonl に振り分け（candidates は残す）。
+
+文候補は雰囲気グループから出し、構造は WRIME→V/A から決める。
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from emotion_va import wrime_to_va
 from makeData.constants import KEYS
 from makeData.patterns import generate_progression_strum
 from makeData.progressions import PROGRESSIONS, ProgressionSpec
@@ -30,8 +33,9 @@ MIDI_DIR = OUT_ROOT / "midi"
 MANIFEST_DIR = OUT_ROOT / "manifests"
 CANDIDATES_PATH = MANIFEST_DIR / "candidates.jsonl"
 
-_EMOTION_PROMPTS: dict[str, list[str]] = {
-    "joy": [
+# 文の多様性用プロンプト群（構造決定には使わない。V/A が決める）
+_PROMPT_GROUPS: dict[str, list[str]] = {
+    "bright": [
         "明るいギターバッキング",
         "楽しい午後の伴奏",
         "元気が出るストローク",
@@ -41,7 +45,7 @@ _EMOTION_PROMPTS: dict[str, list[str]] = {
         "テンポよく進む伴奏",
         "明るいポップなバッキング",
     ],
-    "sadness": [
+    "sad": [
         "しんみりした夜のバッキング",
         "悲しい気持ちの伴奏",
         "泣きそうなギター",
@@ -60,7 +64,7 @@ _EMOTION_PROMPTS: dict[str, list[str]] = {
         "ゆっくり流れるギター",
         "落ち着いた夜のコード",
     ],
-    "tension": [
+    "tense": [
         "緊迫したギターバッキング",
         "焦りのある伴奏",
         "張りつめたストローク",
@@ -69,29 +73,6 @@ _EMOTION_PROMPTS: dict[str, list[str]] = {
         "せわしないギター伴奏",
         "追い立てられるようなバッキング",
     ],
-}
-
-_EMOTION_STRUCT: dict[str, dict] = {
-    "joy": {
-        "modes": ("major",),
-        "bpm": (108, 140),
-        "energy": ("mid", "high"),
-    },
-    "sadness": {
-        "modes": ("natural_minor",),
-        "bpm": (60, 95),
-        "energy": ("low", "mid"),
-    },
-    "calm": {
-        "modes": ("natural_minor", "major"),
-        "bpm": (70, 105),
-        "energy": ("low", "mid"),
-    },
-    "tension": {
-        "modes": ("natural_minor", "major"),
-        "bpm": (112, 150),
-        "energy": ("mid", "high"),
-    },
 }
 
 
@@ -138,6 +119,28 @@ def split_gates() -> None:
     )
 
 
+def _va_to_struct_range(v: float, a: float) -> dict:
+    """V/A から構造サンプル用のモード・BPM帯・energy 候補を決める。"""
+    if a > 0.3:
+        bpm = (110, 150)
+        energy = ("mid", "high")
+    elif a < -0.2:
+        bpm = (60, 90)
+        energy = ("low", "mid")
+    else:
+        bpm = (85, 120)
+        energy = ("low", "mid", "high")
+
+    if v < -0.2:
+        modes = ("natural_minor",)
+    elif v > 0.2:
+        modes = ("major",)
+    else:
+        modes = ("major", "natural_minor")
+
+    return {"modes": modes, "bpm": bpm, "energy": energy}
+
+
 def _energy_for_bpm(bpm: float, choices: tuple[str, ...], rng: random.Random) -> str:
     if bpm < 90:
         preferred = "low"
@@ -150,11 +153,11 @@ def _energy_for_bpm(bpm: float, choices: tuple[str, ...], rng: random.Random) ->
     return rng.choice(list(choices))
 
 
-def _sample_structure_for_emotion(emotion: str, rng: random.Random) -> dict:
-    pref = _EMOTION_STRUCT[emotion]
+def _sample_structure_for_va(v: float, a: float, rng: random.Random) -> dict:
+    pref = _va_to_struct_range(v, a)
     modes = pref["modes"]
     pool = [p for p in PROGRESSIONS if p.mode in modes] or list(PROGRESSIONS)
-    if emotion == "tension":
+    if a > 0.3 and v < -0.1:
         boosted = [p for p in pool if p.family in ("borrowed", "blues", "diatonic_minor")]
         if boosted:
             pool = boosted + pool
@@ -182,7 +185,7 @@ def _sample_structure_for_emotion(emotion: str, rng: random.Random) -> dict:
 
 def _try_wrime(prompt: str) -> tuple[dict[str, float], str]:
     try:
-        from wrime_emotion import analyze_emotion
+        from emotion_va import analyze_emotion
 
         result = analyze_emotion(prompt)
         return dict(result.scores), str(result.top_label)
@@ -206,17 +209,26 @@ def generate_candidates(
     next_idx = _next_id(existing) if append else 1
     records: list[dict] = []
 
-    for emotion, n in counts.items():
+    for group, n in counts.items():
         if n <= 0:
             continue
-        if emotion not in _EMOTION_PROMPTS:
-            raise ValueError(f"unknown emotion: {emotion}")
-        prompts = _EMOTION_PROMPTS[emotion]
+        if group not in _PROMPT_GROUPS:
+            raise ValueError(f"unknown prompt group: {group}")
+        prompts = _PROMPT_GROUPS[group]
         for i in range(n):
             prompt = prompts[i % len(prompts)]
             if i >= len(prompts):
                 prompt = f"{prompt}（追加{i // len(prompts) + 1}）"
-            structure = _sample_structure_for_emotion(emotion, rng)
+
+            if skip_wrime:
+                raise SystemExit(
+                    "--skip-wrime は廃止しました。候補生成には WRIME→V/A が必須です。"
+                )
+            wrime_scores, wrime_label = _try_wrime(prompt)
+            if not wrime_scores:
+                raise SystemExit(f"WRIME 失敗のため中断: prompt={prompt!r}")
+            v, a = wrime_to_va(wrime_scores)
+            structure = _sample_structure_for_va(v, a, rng)
             spec = next(p for p in PROGRESSIONS if p.name == structure["progression"])
             music = generate_progression_strum(
                 spec=spec,
@@ -231,18 +243,14 @@ def generate_candidates(
             rel_midi = f"midi/{pair_id}.mid"
             save_music(music, OUT_ROOT / rel_midi)
 
-            if skip_wrime:
-                wrime_scores, wrime_label = {}, ""
-            else:
-                wrime_scores, wrime_label = _try_wrime(prompt)
-
             records.append(
                 {
                     "id": pair_id,
                     "prompt": prompt,
-                    "emotion_target": emotion,
+                    "prompt_group": group,
                     "emotion_wrime": wrime_scores,
-                    "emotion_label": wrime_label or emotion,
+                    "emotion_label": wrime_label,
+                    "va": {"valence": v, "arousal": a},
                     "structure": structure,
                     "midi_path": rel_midi.replace("\\", "/"),
                     "gate": {
@@ -258,7 +266,6 @@ def generate_candidates(
 
     all_rows = existing + records if append else records
     _write_rows(CANDIDATES_PATH, all_rows)
-    # pending 一覧も更新（ゲートしやすく）
     pending = [r for r in all_rows if (r.get("gate") or {}).get("status") == "pending"]
     _write_rows(MANIFEST_DIR / "pending.jsonl", pending)
 
@@ -279,43 +286,39 @@ def main() -> None:
         action="store_true",
         help="既存を消さず追記（ID 継続）",
     )
-    parser.add_argument("--per-emotion", type=int, default=None, help="全感情に同数")
-    parser.add_argument("--joy", type=int, default=None)
-    parser.add_argument("--sadness", type=int, default=None)
+    parser.add_argument("--per-group", type=int, default=None, help="全プロンプト群に同数")
+    parser.add_argument("--bright", type=int, default=None)
+    parser.add_argument("--sad", type=int, default=None)
     parser.add_argument("--calm", type=int, default=None)
-    parser.add_argument("--tension", type=int, default=None)
+    parser.add_argument("--tense", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--skip-wrime", action="store_true")
     args = parser.parse_args()
 
     if args.split:
         split_gates()
         return
 
-    if args.per_emotion is not None:
-        counts = {e: args.per_emotion for e in _EMOTION_PROMPTS}
+    if args.per_group is not None:
+        counts = {g: args.per_group for g in _PROMPT_GROUPS}
     else:
-        # 追加生成の既定: joy/calm を厚く
         counts = {
-            "joy": 40 if args.joy is None else args.joy,
+            "bright": 40 if args.bright is None else args.bright,
             "calm": 40 if args.calm is None else args.calm,
-            "sadness": 15 if args.sadness is None else args.sadness,
-            "tension": 15 if args.tension is None else args.tension,
+            "sad": 15 if args.sad is None else args.sad,
+            "tense": 15 if args.tense is None else args.tense,
         }
-        # 個別指定があれば上書き（None 以外）
-        for key in ("joy", "sadness", "calm", "tension"):
+        for key in ("bright", "sad", "calm", "tense"):
             val = getattr(args, key)
             if val is not None:
                 counts[key] = val
 
-    # 全部 None で per-emotion も無しのとき、明示カウントが 0 ばかりならエラー回避
     if not any(counts.values()):
         raise SystemExit("生成件数が 0 です")
 
     generate_candidates(
         counts=counts,
         seed=args.seed,
-        skip_wrime=args.skip_wrime,
+        skip_wrime=False,
         append=args.append,
     )
 

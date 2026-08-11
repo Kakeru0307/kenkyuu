@@ -26,17 +26,18 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, Subset
 
 ROOT = Path(__file__).resolve().parent
-# scripts/ → prttype root; or colab_train root when file sits at top level
 if ROOT.name == "scripts":
     ROOT = ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from emotion_va import wrime_to_va  # noqa: E402
 from structure_prior import (  # noqa: E402
     BARS_PER_CHORD,
     BPM_HI,
     BPM_LO,
     ENERGIES,
+    FEATURE_DIM,
     KEYS,
     MODES,
     PROGRESSIONS,
@@ -48,6 +49,21 @@ from structure_prior import (  # noqa: E402
 )
 
 
+def row_va(row: dict[str, Any]) -> tuple[float, float]:
+    va = row.get("va")
+    if isinstance(va, dict):
+        return float(va.get("valence", 0.0)), float(va.get("arousal", 0.0))
+    if isinstance(va, (list, tuple)) and len(va) >= 2:
+        return float(va[0]), float(va[1])
+    return wrime_to_va(row.get("emotion_wrime"))
+
+
+def va_quadrant(v: float, a: float) -> str:
+    hv = "pos" if v >= 0 else "neg"
+    ha = "high" if a >= 0 else "low"
+    return f"{hv}_{ha}"
+
+
 def load_accept_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -56,7 +72,6 @@ def load_accept_rows(path: Path) -> list[dict[str, Any]]:
         row = json.loads(line)
         gate = (row.get("gate") or {}).get("status")
         if gate not in (None, "accept"):
-            # accept.jsonl should already be filtered; skip rejects if mixed
             continue
         if gate is None and path.name != "accept.jsonl":
             continue
@@ -74,9 +89,8 @@ def load_accept_rows(path: Path) -> list[dict[str, Any]]:
 
 
 class PriorPairDataset(Dataset):
-    def __init__(self, rows: list[dict[str, Any]], *, use_emotion_target: bool = True) -> None:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
-        self.use_emotion_target = use_emotion_target
         self.prog_i = {n: i for i, n in enumerate(PROGRESSIONS)}
         self.key_i = {n: i for i, n in enumerate(KEYS)}
         self.mode_i = {n: i for i, n in enumerate(MODES)}
@@ -100,11 +114,7 @@ class PriorPairDataset(Dataset):
         if bpc not in self.bpc_i:
             bpc = 1 if bpc < 2 else 2
 
-        x = encode_features(
-            wrime=row.get("emotion_wrime"),
-            emotion_target=row.get("emotion_target") or row.get("emotion_label"),
-            use_emotion_target=self.use_emotion_target,
-        )
+        x = encode_features(wrime=row.get("emotion_wrime"), va=row_va(row))
         return {
             "x": torch.tensor(x, dtype=torch.float32),
             "bpm": torch.tensor(bpm_to_unit(float(st["bpm"])), dtype=torch.float32),
@@ -125,17 +135,17 @@ def stratified_split(
     rng = random.Random(seed)
     by_label: dict[str, list[int]] = {}
     for i, r in enumerate(rows):
-        lab = r.get("emotion_target") or r.get("emotion_label") or "na"
+        v, a = row_va(r)
+        lab = va_quadrant(v, a)
         by_label.setdefault(lab, []).append(i)
     train_idx: list[int] = []
     val_idx: list[int] = []
-    for lab, idxs in by_label.items():
+    for _lab, idxs in by_label.items():
         rng.shuffle(idxs)
         n_val = max(1, int(round(len(idxs) * val_ratio))) if len(idxs) >= 5 else max(0, len(idxs) // 5)
         val_idx.extend(idxs[:n_val])
         train_idx.extend(idxs[n_val:])
     if not train_idx:
-        # tiny set fallback
         train_idx, val_idx = val_idx[:-1] or val_idx, val_idx[-1:] if val_idx else []
     rng.shuffle(train_idx)
     rng.shuffle(val_idx)
@@ -159,7 +169,6 @@ def batch_loss(
         "prog": ce(out["prog"], batch["prog"]),
         "bpc": ce(out["bpc"], batch["bpc"]),
     }
-    # progression is sparse; keep weight moderate so bpm/energy still learn
     total = (
         2.0 * losses["bpm"]
         + 1.5 * losses["energy"]
@@ -210,29 +219,26 @@ def evaluate(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train WRIME→structure prior")
+    parser = argparse.ArgumentParser(description="Train WRIME+VA→structure prior")
     parser.add_argument(
         "--jsonl",
         type=Path,
         default=ROOT / "data" / "prior_pairs" / "manifests" / "accept.jsonl",
     )
-    parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "prior")
-    parser.add_argument("--ckpt-name", type=str, default="prior_last.pt")
+    parser.add_argument("--checkpoint-dir", type=Path, default=ROOT / "checkpoints" / "structure_prior")
+    parser.add_argument("--ckpt-name", type=str, default="structure_prior_last.pt")
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden", type=int, default=64)
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--no-emotion-target", action="store_true")
     args = parser.parse_args()
 
-    use_et = not args.no_emotion_target
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
     jsonl = args.jsonl if args.jsonl.is_absolute() else (ROOT / args.jsonl)
-    # colab default path fallback
     if not jsonl.is_file():
         alt = ROOT / "data" / "prior_pairs" / "accept.jsonl"
         if alt.is_file():
@@ -240,10 +246,10 @@ def main() -> None:
     ckpt_dir = args.checkpoint_dir if args.checkpoint_dir.is_absolute() else (ROOT / args.checkpoint_dir)
     rows = load_accept_rows(jsonl)
     print(f"rows={len(rows)} from {jsonl}")
-    print("emotion_target", dict(Counter(r.get("emotion_target") for r in rows)))
+    print("va_quadrant", dict(Counter(va_quadrant(*row_va(r)) for r in rows)))
 
     train_idx, val_idx = stratified_split(rows, val_ratio=args.val_ratio, seed=args.seed)
-    ds = PriorPairDataset(rows, use_emotion_target=use_et)
+    ds = PriorPairDataset(rows)
     train_loader = DataLoader(
         Subset(ds, train_idx),
         batch_size=min(args.batch_size, max(1, len(train_idx))),
@@ -257,7 +263,8 @@ def main() -> None:
     print(f"split train={len(train_idx)} val={len(val_idx)}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    in_dim = feature_dim(use_emotion_target=use_et)
+    in_dim = feature_dim()
+    assert in_dim == FEATURE_DIM
     model = StructurePriorNet(in_dim, hidden=args.hidden).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ce = nn.CrossEntropyLoss(label_smoothing=0.05)
@@ -304,7 +311,7 @@ def main() -> None:
         "meta": {
             "in_dim": in_dim,
             "hidden": args.hidden,
-            "use_emotion_target": use_et,
+            "feature": "wrime8+va2",
             "epochs": args.epochs,
             "lr": args.lr,
             "n_train": len(train_idx),
@@ -321,26 +328,25 @@ def main() -> None:
     torch.save(blob, ckpt_path)
     print(f"wrote {ckpt_path}")
 
-    # quick sanity: one example per emotion_target
     model.eval()
     shown: set[str] = set()
     for row in rows:
-        lab = row.get("emotion_target") or "?"
+        v, a = row_va(row)
+        lab = va_quadrant(v, a)
         if lab in shown:
             continue
         shown.add(lab)
         pred = predict_structure(
             model,
             wrime=row.get("emotion_wrime"),
-            emotion_target=row.get("emotion_target"),
-            use_emotion_target=use_et,
+            va=(v, a),
             device=device,
         )
         gold = row["structure"]
         print(
-            f"sample[{lab}] pred bpm={pred.bpm} energy={pred.energy} mode={pred.mode} "
-            f"prog={pred.progression} | gold bpm={gold['bpm']} energy={gold.get('energy')} "
-            f"mode={gold.get('mode')} prog={gold['progression']}"
+            f"sample[{lab} V={v:+.2f} A={a:+.2f}] pred bpm={pred.bpm} energy={pred.energy} "
+            f"mode={pred.mode} prog={pred.progression} | gold bpm={gold['bpm']} "
+            f"energy={gold.get('energy')} mode={gold.get('mode')} prog={gold['progression']}"
         )
 
 

@@ -264,7 +264,7 @@ function render() {
     tr.innerHTML = `
       <td class="meta">${i+1}<br><span>${r.id}</span></td>
       <td class="prompt">${escapeHtml(r.prompt)}</td>
-      <td class="meta">${r.emotion_target} · ${r.structure.energy} · BPM ${r.structure.bpm}<br>${r.structure.progression} / ${r.structure.key}</td>
+      <td class="meta">V=${(r.va?.valence ?? 0).toFixed?.(2) ?? r.va?.valence ?? '—'} A=${(r.va?.arousal ?? 0).toFixed?.(2) ?? r.va?.arousal ?? '—'} · ${r.structure.energy} · BPM ${r.structure.bpm}<br>${r.structure.progression} / ${r.structure.key}</td>
       <td><span class="${statusClass(st)}" id="st-${i}">${st}</span></td>
       <td><span class="score" id="sc-${i}">${sc == null ? '—' : sc}</span></td>
       <td class="btns">

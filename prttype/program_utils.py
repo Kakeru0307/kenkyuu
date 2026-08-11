@@ -19,9 +19,13 @@ GUITAR_PROGRAM_NAMES: dict[int, str] = {
 GUITAR_PITCH_MIN = 40
 GUITAR_PITCH_MAX = 76
 
+# GM Electric Bass (finger) → program // 8 == 4
+BASS_PROGRAM = 33
+
 # パッチ category → DAW 再生用の代表 program（未指定は category * 8）
 CATEGORY_DEFAULT_PROGRAM: dict[int, int] = {
     3: GUITAR_PROGRAM,
+    4: BASS_PROGRAM,
 }
 
 

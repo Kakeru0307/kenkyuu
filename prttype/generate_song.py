@@ -11,6 +11,7 @@ from pathlib import Path
 
 import muspy
 
+from checkpoint_paths import resolve_part_checkpoint
 from generate_backing import generate_backing
 from generate_lead import generate_lead
 from inference import MIDI_DIR
@@ -22,8 +23,8 @@ from program_utils import (
 from sample_structure_params import DEFAULT_PRIOR_CKPT, resolve_structure_params
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-BACKING_CKPT = SCRIPT_DIR / "checkpoints" / "backing" / "unet_last.pt"
-LEAD_CKPT = SCRIPT_DIR / "checkpoints" / "lead" / "unet_last.pt"
+BACKING_CKPT = resolve_part_checkpoint("backing")
+LEAD_CKPT = resolve_part_checkpoint("lead")
 DEFAULT_PRIOR_CHECKPOINT = DEFAULT_PRIOR_CKPT
 
 
@@ -172,7 +173,7 @@ def main() -> None:
     print(
         f"[structure:{params.source}] progression={params.progression} "
         f"key={params.key} bpm={params.bpm} energy={params.energy} "
-        f"mode={params.mode} emotion={params.emotion_target or '-'} "
+        f"mode={params.mode} va=({params.va[0]:+.2f},{params.va[1]:+.2f}) "
         f"bars_per_chord={params.bars_per_chord}"
     )
     generate_song(
