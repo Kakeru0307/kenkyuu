@@ -1,6 +1,6 @@
 """生成時の構造パラメータ（進行・キー・BPM・energy）。
 
-最終形: 文 → WRIME → V/A → structure prior。
+最終形: 文 → VA encoder → structure prior。
 prior チェックポイントが無い／文が無い場合のみ、カタログ乱択にフォールバックする。
 """
 
@@ -61,7 +61,6 @@ def sample_structure_params(*, seed: int | None = None) -> StructureParams:
 def structure_from_prior(
     *,
     text: str | None = None,
-    wrime: dict[str, float] | None = None,
     va: tuple[float, float] | None = None,
     prior_checkpoint: Path | None = DEFAULT_PRIOR_CKPT,
     bars: int = 8,
@@ -70,31 +69,29 @@ def structure_from_prior(
     temperature: float = 1.0,
     seed: int | None = None,
 ) -> StructureParams:
-    """WRIME（または文）から V/A を得て structure prior で構造を推論する。
+    """V/A から structure prior で構造を推論する。
 
+    VA が渡されない場合はテキストから analyze_va() で取得する。
     既定は分布からサンプル（同じ文でも seed が違えば別テイク）。
     sample=False で argmax（決定的）。
     """
-    from emotion_va import analyze_emotion, wrime_to_va
+    from emotion_va import analyze_va
     from structure_prior import load_prior, predict_structure
 
     ckpt = prior_checkpoint or DEFAULT_PRIOR_CKPT
     if not Path(ckpt).is_file():
         raise FileNotFoundError(f"structure prior checkpoint がありません: {ckpt}")
 
-    scores = wrime
-    if scores is None:
-        if not text:
-            raise ValueError("text または wrime が必要です")
-        w = analyze_emotion(text)
-        scores = dict(w.scores)
-
-    resolved_va = va if va is not None else wrime_to_va(scores)
+    if va is not None:
+        resolved_va = va
+    elif text:
+        resolved_va = analyze_va(text)
+    else:
+        raise ValueError("va または text が必要です")
 
     model, _blob = load_prior(ckpt, device=device)
     pred = predict_structure(
         model,
-        wrime=scores,
         va=resolved_va,
         bars=bars,
         device=device,
@@ -119,7 +116,6 @@ def structure_from_prior(
 def resolve_structure_params(
     *,
     text: str | None = None,
-    wrime: dict[str, float] | None = None,
     va: tuple[float, float] | None = None,
     prior_checkpoint: Path | None = DEFAULT_PRIOR_CKPT,
     seed: int | None = None,
@@ -127,12 +123,11 @@ def resolve_structure_params(
     sample: bool = True,
     temperature: float = 1.0,
 ) -> StructureParams:
-    """文があれば prior、無ければカタログ乱択。prior 欠落時はカタログへ落とす。"""
+    """VA があれば prior、無ければカタログ乱択。prior 欠落時はカタログへ落とす。"""
     ckpt = Path(prior_checkpoint) if prior_checkpoint else DEFAULT_PRIOR_CKPT
-    if prefer_prior and (text or wrime or va is not None) and ckpt.is_file():
+    if prefer_prior and (text or va is not None) and ckpt.is_file():
         return structure_from_prior(
             text=text,
-            wrime=wrime,
             va=va,
             prior_checkpoint=ckpt,
             sample=sample,

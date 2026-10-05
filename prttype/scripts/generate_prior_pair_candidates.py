@@ -6,7 +6,7 @@
 --append で既存を消さず追記。ID は既存最大の次から。
 --split で accept.jsonl / reject.jsonl に振り分け（candidates は残す）。
 
-文候補は雰囲気グループから出し、構造は WRIME→V/A から決める。
+文候補は雰囲気グループから出し、構造は VA encoder→V/A から決める。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from emotion_va import wrime_to_va
+from emotion_va import analyze_va
 from makeData.constants import KEYS
 from makeData.patterns import generate_progression_strum
 from makeData.progressions import PROGRESSIONS, ProgressionSpec
@@ -183,22 +183,10 @@ def _sample_structure_for_va(v: float, a: float, rng: random.Random) -> dict:
     }
 
 
-def _try_wrime(prompt: str) -> tuple[dict[str, float], str]:
-    try:
-        from emotion_va import analyze_emotion
-
-        result = analyze_emotion(prompt)
-        return dict(result.scores), str(result.top_label)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[warn] WRIME スキップ: {exc}")
-        return {}, ""
-
-
 def generate_candidates(
     *,
     counts: dict[str, int],
     seed: int,
-    skip_wrime: bool,
     append: bool,
 ) -> Path:
     rng = random.Random(seed)
@@ -220,14 +208,7 @@ def generate_candidates(
             if i >= len(prompts):
                 prompt = f"{prompt}（追加{i // len(prompts) + 1}）"
 
-            if skip_wrime:
-                raise SystemExit(
-                    "--skip-wrime は廃止しました。候補生成には WRIME→V/A が必須です。"
-                )
-            wrime_scores, wrime_label = _try_wrime(prompt)
-            if not wrime_scores:
-                raise SystemExit(f"WRIME 失敗のため中断: prompt={prompt!r}")
-            v, a = wrime_to_va(wrime_scores)
+            v, a = analyze_va(prompt)
             structure = _sample_structure_for_va(v, a, rng)
             spec = next(p for p in PROGRESSIONS if p.name == structure["progression"])
             music = generate_progression_strum(
@@ -248,9 +229,8 @@ def generate_candidates(
                     "id": pair_id,
                     "prompt": prompt,
                     "prompt_group": group,
-                    "emotion_wrime": wrime_scores,
-                    "emotion_label": wrime_label,
                     "va": {"valence": v, "arousal": a},
+                    "va_source": "xlm_roberta_large",
                     "structure": structure,
                     "midi_path": rel_midi.replace("\\", "/"),
                     "gate": {
@@ -318,7 +298,6 @@ def main() -> None:
     generate_candidates(
         counts=counts,
         seed=args.seed,
-        skip_wrime=False,
         append=args.append,
     )
 

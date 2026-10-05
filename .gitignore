@@ -32,3 +32,6 @@ docs/生成結果/**/*.pt
 # OS
 .DS_Store
 Thumbs.db
+
+# VA encoder weights (gmendes9 XLM-RoBERTa-large ~2GB)
+prttype/checkpoints/va_encoder/

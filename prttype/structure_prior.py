@@ -1,7 +1,9 @@
-"""Structure prior: WRIME + V/A → musical structure params.
+"""Structure prior: V/A → musical structure params.
 
-Trained on gated prior_pairs accept rows. Inference for the final pipeline
-(文 → WRIME → V/A → prior → backing/lead).
+Trained on gated prior_pairs accept rows + EMOPIA pairs.
+Inference for the final pipeline (文 → VA encoder → V/A → prior → backing/lead).
+
+v2: 入力は VA 2次元（感情エンコーダがテキストから直接回帰）。
 """
 
 from __future__ import annotations
@@ -13,21 +15,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from emotion_va import wrime_to_va
-
-WRIME_KEYS: tuple[str, ...] = (
-    "joy",
-    "sadness",
-    "anticipation",
-    "surprise",
-    "anger",
-    "fear",
-    "disgust",
-    "trust",
-)
-
-# WRIME 8 + valence + arousal
-FEATURE_DIM = len(WRIME_KEYS) + 2
+# valence + arousal の 2次元のみ
+FEATURE_DIM = 2
 
 PROGRESSIONS: tuple[str, ...] = (
     "marusa",
@@ -84,8 +73,9 @@ MODES: tuple[str, ...] = ("major", "natural_minor")
 ENERGIES: tuple[str, ...] = ("low", "mid", "high")
 BARS_PER_CHORD: tuple[int, ...] = (1, 2)
 
-BPM_LO = 60.0
-BPM_HI = 150.0
+# VGMIDI 実テンポを折り込まず学習するため広め。推論時もこの範囲で unit↔BPM。
+BPM_LO = 40.0
+BPM_HI = 240.0
 
 _PROGRESSION_FAMILY: dict[str, str] = {
     **{
@@ -117,11 +107,6 @@ class StructurePriorOut:
         return asdict(self)
 
 
-def wrime_to_vec(wrime: dict[str, float] | None) -> list[float]:
-    w = wrime or {}
-    return [float(w.get(k, 0.0)) for k in WRIME_KEYS]
-
-
 def bpm_to_unit(bpm: float) -> float:
     return max(0.0, min(1.0, (float(bpm) - BPM_LO) / (BPM_HI - BPM_LO)))
 
@@ -130,28 +115,12 @@ def unit_to_bpm(u: float) -> float:
     return BPM_LO + float(u) * (BPM_HI - BPM_LO)
 
 
-def feature_dim() -> int:
-    return FEATURE_DIM
-
-
-def _resolve_va(
-    *,
-    wrime: dict[str, float] | None,
-    va: tuple[float, float] | None,
-) -> tuple[float, float]:
-    if va is not None:
-        return float(va[0]), float(va[1])
-    return wrime_to_va(wrime)
-
-
 def encode_features(
     *,
-    wrime: dict[str, float] | None,
-    va: tuple[float, float] | None = None,
+    va: tuple[float, float],
 ) -> list[float]:
-    """WRIME 8スコア + Valence/Arousal → 10次元特徴。"""
-    v, a = _resolve_va(wrime=wrime, va=va)
-    return wrime_to_vec(wrime) + [v, a]
+    """Valence/Arousal → 2次元特徴。"""
+    return [float(va[0]), float(va[1])]
 
 
 class StructurePriorNet(nn.Module):
@@ -256,7 +225,7 @@ def load_prior(
     if in_dim != FEATURE_DIM:
         raise RuntimeError(
             f"structure prior checkpoint の in_dim={in_dim} は非互換です "
-            f"（期待値={FEATURE_DIM}: WRIME8+VA2）。"
+            f"（期待値={FEATURE_DIM}: VA2）。"
             " train_structure_prior.py で再学習してください。"
         )
     hidden = int(meta.get("hidden", 64))
@@ -272,15 +241,15 @@ def load_prior(
 def predict_structure(
     model: StructurePriorNet,
     *,
-    wrime: dict[str, float] | None,
-    va: tuple[float, float] | None = None,
+    va: tuple[float, float],
     bars: int = 8,
     device: str | torch.device | None = None,
     sample: bool = True,
     temperature: float = 1.0,
     seed: int | None = None,
 ) -> StructurePriorOut:
-    feats = encode_features(wrime=wrime, va=va)
+    resolved_va: tuple[float, float] = va if va is not None else (0.0, 0.0)
+    feats = encode_features(va=resolved_va)
     x = torch.tensor([feats], dtype=torch.float32)
     if device is not None:
         x = x.to(device)

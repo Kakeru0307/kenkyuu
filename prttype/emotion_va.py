@@ -1,145 +1,136 @@
-"""テキスト感情解析: WRIME 8スコア → Valence/Arousal。"""
+"""テキスト感情エンコーダ: テキスト → Valence/Arousal。
+
+本線 API: analyze_va(text) → (valence, arousal)
+
+モデル: gmendes9/multilingual_va_prediction の XLM-RoBERTa-large
+配置: checkpoints/va_encoder/xlm_roberta_large/（pytorch_model.bin 等）
+
+ckpt が無い場合はエラー（WRIME 等へのフォールバックはしない）。
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
 
 import torch
 
-HF_MODEL_ID = "MuneK/bert-large-japanese-v2-finetuned-wrime"
-WRIME_LABELS = (
-    "joy",
-    "sadness",
-    "anticipation",
-    "surprise",
-    "anger",
-    "fear",
-    "disgust",
-    "trust",
+_VA_CKPT_DEFAULT = (
+    Path(__file__).resolve().parent / "checkpoints" / "va_encoder" / "xlm_roberta_large"
 )
 
-# Plutchik 8感情 → Russell V/A 平面の固定座標（近似）
-_PLUTCHIK_VA: dict[str, tuple[float, float]] = {
-    "joy": (+0.90, +0.60),
-    "trust": (+0.70, +0.10),
-    "anticipation": (+0.30, +0.50),
-    "surprise": (+0.10, +0.80),
-    "anger": (-0.70, +0.80),
-    "fear": (-0.60, +0.70),
-    "disgust": (-0.80, +0.30),
-    "sadness": (-0.70, -0.40),
-}
+
+def _resolve_va_ckpt(ckpt_path: Path | str) -> Path:
+    """存在する VA ckpt パスを返す。無ければ FileNotFoundError。"""
+    p = Path(ckpt_path)
+    if p.is_dir() and (p / "pytorch_model.bin").is_file():
+        return p
+    if p.is_file():
+        return p
+    raise FileNotFoundError(
+        f"VA encoder checkpoint がありません: {ckpt_path}\n"
+        "gmendes9/multilingual_va_prediction の XLM-RoBERTa-large を\n"
+        "checkpoints/va_encoder/xlm_roberta_large/ に配置してください。"
+    )
 
 
-@dataclass
-class WrimeScores:
-    scores: dict[str, float]
-    top_label: str
-    top_score: float
-    text: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "scores": self.scores,
-            "top_label": self.top_label,
-            "top_score": self.top_score,
-            "text": self.text,
-        }
+def _hard_sigmoid(x: torch.Tensor) -> torch.Tensor:
+    """論文どおり 0..1 に潰す hard-sigmoid。"""
+    return torch.clamp((x + 1.0) * 0.5, 0.0, 1.0)
 
 
-def wrime_to_va(scores: dict[str, float] | None) -> tuple[float, float]:
-    """WRIME 8スコアの加重平均で Valence / Arousal（各 -1〜+1）を返す。"""
-    w = scores or {}
-    total = 0.0
-    v_sum = 0.0
-    a_sum = 0.0
-    for label, (valence, arousal) in _PLUTCHIK_VA.items():
-        s = float(w.get(label, 0.0))
-        total += s
-        v_sum += s * valence
-        a_sum += s * arousal
-    if total <= 0.0:
-        return 0.0, 0.0
-    return v_sum / total, a_sum / total
+class XlmRobertaVaAnalyzer:
+    """XLM-RoBERTa-large ベースの VA 回帰。
 
-
-class WrimeEmotionAnalyzer:
-    """MuneK/bert-large-japanese-v2-finetuned-wrime で 8 感情強度を推定する。"""
+    HF 形式（roberta.* + classifier.dense / classifier.out_proj）を読み、
+    出力を structure prior 向け [-1, +1] に変換する。
+    """
 
     def __init__(
         self,
-        model_id: str = HF_MODEL_ID,
+        ckpt_path: Path | str = _VA_CKPT_DEFAULT,
         *,
         device: str | None = None,
     ) -> None:
         try:
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            from transformers import AutoTokenizer, XLMRobertaConfig, XLMRobertaModel
         except ImportError as exc:
             raise ImportError(
-                "WRIME には transformers が必要です: pip install 'transformers>=4.36,<5'"
+                "VA encoder には transformers / sentencepiece / protobuf が必要です"
             ) from exc
 
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_id)
-        self.model.to(self.device)
-        self.model.eval()
 
-        id2label = getattr(self.model.config, "id2label", None) or {}
-        self.labels = list(WRIME_LABELS)
-        if id2label and len(id2label) == len(WRIME_LABELS):
-            ordered = [str(id2label[i]) for i in range(len(id2label))]
-            if not all(name.startswith("LABEL_") for name in ordered):
-                self.labels = ordered
+        resolved = _resolve_va_ckpt(ckpt_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(str(resolved))
+        config = XLMRobertaConfig.from_pretrained(str(resolved))
+        state = torch.load(resolved / "pytorch_model.bin", map_location="cpu", weights_only=False)
+
+        if not any(k.startswith("roberta.") for k in state):
+            raise RuntimeError(
+                f"想定外の state_dict です（roberta.* キー無し）: {resolved}"
+            )
+
+        self.backbone = XLMRobertaModel(config)
+        hidden = int(config.hidden_size)
+        self.dense = torch.nn.Linear(hidden, hidden)
+        self.out_proj = torch.nn.Linear(hidden, 2)
+
+        backbone_state = {
+            k[len("roberta.") :]: v for k, v in state.items() if k.startswith("roberta.")
+        }
+        self.backbone.load_state_dict(backbone_state, strict=False)
+        self.dense.load_state_dict(
+            {
+                "weight": state["classifier.dense.weight"],
+                "bias": state["classifier.dense.bias"],
+            }
+        )
+        self.out_proj.load_state_dict(
+            {
+                "weight": state["classifier.out_proj.weight"],
+                "bias": state["classifier.out_proj.bias"],
+            }
+        )
+
+        self.backbone.to(self.device).eval()
+        self.dense.to(self.device).eval()
+        self.out_proj.to(self.device).eval()
 
     @torch.inference_mode()
-    def analyze(self, text: str) -> WrimeScores:
-        text = text.strip()
+    def analyze(self, text: str) -> tuple[float, float]:
+        """テキスト → (valence, arousal)。各値は -1〜+1。"""
         encoded = self.tokenizer(
-            text,
+            text.strip(),
             return_tensors="pt",
             truncation=True,
             max_length=256,
             padding=True,
         )
         encoded = {k: v.to(self.device) for k, v in encoded.items()}
-        logits = self.model(**encoded).logits.squeeze(0)
-        values = logits.detach().cpu().float()
-        if values.ndim == 0:
-            values = values.unsqueeze(0)
-        values = values.tolist()
-        vmax = max(abs(float(v)) for v in values) if values else 0.0
-        if vmax > 1.5:
-            values = [max(0.0, min(1.0, float(v) / 3.0)) for v in values]
-        elif min(float(v) for v in values) < 0:
-            values = torch.sigmoid(torch.tensor(values)).tolist()
-        else:
-            values = [max(0.0, min(1.0, float(v))) for v in values]
-        scores = {
-            label: float(values[i]) if i < len(values) else 0.0
-            for i, label in enumerate(self.labels)
-        }
-        top_label = max(scores, key=scores.get)
-        return WrimeScores(
-            scores=scores,
-            top_label=top_label,
-            top_score=scores[top_label],
-            text=text,
-        )
+        outputs = self.backbone(**encoded)
+        x = outputs.last_hidden_state[:, 0, :]
+        x = torch.tanh(self.dense(x))
+        logits = self.out_proj(x).squeeze(0)
+        va01 = _hard_sigmoid(logits)
+        va = va01 * 2.0 - 1.0
+        return float(va[0].item()), float(va[1].item())
 
 
-_analyzer: WrimeEmotionAnalyzer | None = None
+_va_analyzer: XlmRobertaVaAnalyzer | None = None
+_va_analyzer_ckpt: Path | None = None
 
 
-def get_analyzer(**kwargs: Any) -> WrimeEmotionAnalyzer:
-    global _analyzer
-    if _analyzer is None:
-        _analyzer = WrimeEmotionAnalyzer(**kwargs)
-    return _analyzer
+def get_va_analyzer(ckpt_path: Path | str = _VA_CKPT_DEFAULT) -> XlmRobertaVaAnalyzer:
+    global _va_analyzer, _va_analyzer_ckpt
+    p = _resolve_va_ckpt(ckpt_path)
+    if _va_analyzer is None or _va_analyzer_ckpt != p:
+        _va_analyzer = XlmRobertaVaAnalyzer(p)
+        _va_analyzer_ckpt = p
+    return _va_analyzer
 
 
-def analyze_emotion(text: str, **kwargs: Any) -> WrimeScores:
-    return get_analyzer(**kwargs).analyze(text)
+def analyze_va(text: str, ckpt_path: Path | str = _VA_CKPT_DEFAULT) -> tuple[float, float]:
+    """テキスト → (valence, arousal)。VA encoder 必須。"""
+    return get_va_analyzer(ckpt_path).analyze(text)
