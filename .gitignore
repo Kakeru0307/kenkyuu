@@ -12,11 +12,25 @@ __pycache__/
 colab_train/
 
 # データ・生成物（Colab 側で生成）
-# data/ 直下は除外しつつ、accept.jsonl だけ追跡する
+# data/ 直下は除外しつつ、accept.jsonl と prior 用 pairs JSONL だけ追跡する
+# 音声本体（pmemo/deam/vgmidi midi 等）は追跡しない
 prttype/data/**
 !prttype/data/prior_pairs/
 !prttype/data/prior_pairs/manifests/
 !prttype/data/prior_pairs/manifests/accept.jsonl
+!prttype/data/pmemo_pairs/
+!prttype/data/pmemo_pairs/structure_pairs.jsonl
+!prttype/data/deam_pairs/
+!prttype/data/deam_pairs/structure_pairs.jsonl
+!prttype/data/vgmidi_pairs/
+!prttype/data/vgmidi_pairs/structure_pairs.jsonl
+!prttype/data/emopia_pairs/
+!prttype/data/emopia_pairs/structure_pairs.jsonl
+!prttype/data/fme24_pairs/
+!prttype/data/fme24_pairs/structure_pairs.jsonl
+!prttype/data/high_bpm_pairs/
+!prttype/data/high_bpm_pairs/structure_pairs.jsonl
+!prttype/data/high_bpm_pairs/structure_pairs_highA.jsonl
 prttype/midi/
 *.npy
 

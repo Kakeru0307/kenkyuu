@@ -1,12 +1,18 @@
-"""Train VA → structure prior on accept.jsonl (+ optional VGMIDI/EMOPIA pairs).
+"""Train VA → structure prior on accept.jsonl (+ optional extra pairs).
 
 Usage:
   python scripts/train_structure_prior.py \\
     --jsonl data/prior_pairs/manifests/accept.jsonl \\
-    --extra-jsonl data/vgmidi_pairs/structure_pairs.jsonl data/emopia_pairs/structure_pairs.jsonl \\
+    --extra-jsonl \\
+      data/vgmidi_pairs/structure_pairs.jsonl \\
+      data/emopia_pairs/structure_pairs.jsonl \\
+      data/pmemo_pairs/structure_pairs.jsonl \\
+      data/fme24_pairs/structure_pairs.jsonl \\
+      data/high_bpm_pairs/structure_pairs.jsonl \\
     --checkpoint-dir checkpoints/structure_prior
 
 extra 行で欠けた項目（BPM・energy・mode・key・prog・bpc）は損失から除外する。
+ソース均等サンプリング: accept / vgmidi / emopia / pmemo / deam / fme24 / high_bpm
 """
 
 from __future__ import annotations
@@ -90,7 +96,7 @@ MASKABLE_HEADS: tuple[str, ...] = ("bpm", "energy", "mode", "key", "prog", "bpc"
 
 def source_of(row: dict[str, Any]) -> str:
     src = str(row.get("source") or "unknown").strip().lower()
-    if src in ("accept", "vgmidi", "emopia"):
+    if src in ("accept", "vgmidi", "emopia", "pmemo", "deam", "fme24", "high_bpm"):
         return src
     return "unknown"
 
