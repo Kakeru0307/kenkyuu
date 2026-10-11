@@ -13,6 +13,7 @@ from pathlib import Path
 from checkpoint_paths import resolve_structure_prior_checkpoint
 from makeData.constants import BPM_RANGE, KEYS
 from makeData.progressions import PROGRESSIONS, ProgressionSpec
+from structure_prior import energy_from_bpm
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_PRIOR_CKPT = resolve_structure_prior_checkpoint()
@@ -43,7 +44,7 @@ def sample_structure_params(*, seed: int | None = None) -> StructureParams:
     key = rng.choice(key_pool)
     bpm = float(rng.randint(BPM_RANGE[0], BPM_RANGE[1]))
     bars_per_chord = rng.choice((1, 1, 1, 2))
-    energy = "low" if bpm < 90 else ("high" if bpm >= 120 else "mid")
+    energy = energy_from_bpm(bpm)
     return StructureParams(
         progression=spec.name,
         key=key,

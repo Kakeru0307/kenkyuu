@@ -8,11 +8,12 @@ Usage:
       data/emopia_pairs/structure_pairs.jsonl \\
       data/pmemo_pairs/structure_pairs.jsonl \\
       data/fme24_pairs/structure_pairs.jsonl \\
-      data/high_bpm_pairs/structure_pairs.jsonl \\
     --checkpoint-dir checkpoints/structure_prior
 
-extra 行で欠けた項目（BPM・energy・mode・key・prog・bpc）は損失から除外する。
-ソース均等サンプリング: accept / vgmidi / emopia / pmemo / deam / fme24 / high_bpm
+BPM はビン分類（soft label）。energy は学習しない（推論時に BPM から導出）。
+extra 行で欠けた項目（BPM・mode・key・prog・bpc）は損失から除外する。
+ソース均等サンプリング: accept / vgmidi / emopia / pmemo / deam / fme24
+（high_bpm は分布を歪めるため均等ソースに含めない・推奨しない）
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler
 
 ROOT = Path(__file__).resolve().parent
@@ -37,18 +39,28 @@ if str(ROOT) not in sys.path:
 
 from structure_prior import (  # noqa: E402
     BARS_PER_CHORD,
+    BPM_BIN_EDGES,
     BPM_HI,
     BPM_LO,
-    ENERGIES,
     FEATURE_DIM,
     KEYS,
     MODES,
+    N_BPM_BINS,
     PROGRESSIONS,
     StructurePriorNet,
-    bpm_to_unit,
+    bin_to_bpm,
+    bpm_to_bin,
     encode_features,
+    energy_from_bpm,
     predict_structure,
 )
+
+# 均等サンプリング対象（high_bpm は意図的に除外）
+EQUAL_SOURCES: frozenset[str] = frozenset(
+    ("accept", "vgmidi", "emopia", "pmemo", "deam", "fme24")
+)
+MASKABLE_HEADS: tuple[str, ...] = ("bpm", "mode", "key", "prog", "bpc")
+BPM_SOFT_NEIGHBOR = 0.15
 
 
 def row_va(row: dict[str, Any]) -> tuple[float, float]:
@@ -91,13 +103,11 @@ def load_accept_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-MASKABLE_HEADS: tuple[str, ...] = ("bpm", "energy", "mode", "key", "prog", "bpc")
-
-
 def source_of(row: dict[str, Any]) -> str:
     src = str(row.get("source") or "unknown").strip().lower()
-    if src in ("accept", "vgmidi", "emopia", "pmemo", "deam", "fme24", "high_bpm"):
+    if src in EQUAL_SOURCES:
         return src
+    # high_bpm 等は均等バケットに入れず、自然頻度に近い unknown 扱い
     return "unknown"
 
 
@@ -116,8 +126,7 @@ def load_extra_rows(path: Path) -> list[dict[str, Any]]:
     """VGMIDI / EMOPIA 等の追加 JSONL を読む。
 
     無い項目は損失から除外する（_label_mask）。
-    VA が無い行は捨てる。BPM が無い行（EMOPIA）は bpm/energy をマスク。
-    energy は明示が無ければ BPM から決める（BPM も無いときは mid プレースホルダ）。
+    VA が無い行は捨てる。BPM が無い行（EMOPIA）は bpm をマスク。
     """
     rows: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -130,7 +139,6 @@ def load_extra_rows(path: Path) -> list[dict[str, Any]]:
         has_bpm = st.get("bpm") is not None
         mask = {
             "bpm": has_bpm,
-            "energy": st.get("energy") in ENERGIES or has_bpm,
             "mode": st.get("mode") in MODES,
             "prog": st.get("progression") in PROGRESSIONS,
             "key": st.get("key") in KEYS,
@@ -146,13 +154,25 @@ def load_extra_rows(path: Path) -> list[dict[str, Any]]:
             st["key"] = KEYS[0]
         if not mask["bpc"]:
             st["bars_per_chord"] = BARS_PER_CHORD[0]
-        if st.get("energy") not in ENERGIES:
-            bpm = float(st["bpm"])
-            st["energy"] = "low" if bpm < 90 else ("high" if bpm >= 120 else "mid")
         row["structure"] = st
         row["_label_mask"] = mask
         rows.append(row)
     return rows
+
+
+def bpm_soft_targets(bin_idx: torch.Tensor, n_bins: int, neighbor: float = BPM_SOFT_NEIGHBOR) -> torch.Tensor:
+    """正解ビン＋隣に質量を薄く置く soft target（行ごとに正規化）。"""
+    b = bin_idx.long()
+    batch = b.shape[0]
+    t = torch.zeros(batch, n_bins, device=b.device, dtype=torch.float32)
+    center = 1.0 - 2.0 * float(neighbor)
+    t.scatter_(1, b.unsqueeze(1), center)
+    left = (b - 1).clamp(min=0)
+    right = (b + 1).clamp(max=n_bins - 1)
+    ones = torch.ones(batch, 1, device=b.device, dtype=torch.float32) * float(neighbor)
+    t.scatter_add_(1, left.unsqueeze(1), ones)
+    t.scatter_add_(1, right.unsqueeze(1), ones)
+    return t / t.sum(dim=1, keepdim=True).clamp(min=1e-8)
 
 
 class PriorPairDataset(Dataset):
@@ -161,7 +181,6 @@ class PriorPairDataset(Dataset):
         self.prog_i = {n: i for i, n in enumerate(PROGRESSIONS)}
         self.key_i = {n: i for i, n in enumerate(KEYS)}
         self.mode_i = {n: i for i, n in enumerate(MODES)}
-        self.energy_i = {n: i for i, n in enumerate(ENERGIES)}
         self.bpc_i = {n: i for i, n in enumerate(BARS_PER_CHORD)}
 
     def __len__(self) -> int:
@@ -170,10 +189,6 @@ class PriorPairDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         row = self.rows[idx]
         st = row["structure"]
-        energy = st.get("energy")
-        if energy not in self.energy_i:
-            bpm = float(st["bpm"])
-            energy = "low" if bpm < 90 else ("high" if bpm >= 120 else "mid")
         mode = st.get("mode") or "major"
         if mode not in self.mode_i:
             mode = "major"
@@ -185,8 +200,8 @@ class PriorPairDataset(Dataset):
         label_mask = row.get("_label_mask") or {}
         item = {
             "x": torch.tensor(x, dtype=torch.float32),
-            "bpm": torch.tensor(bpm_to_unit(float(st["bpm"])), dtype=torch.float32),
-            "energy": torch.tensor(self.energy_i[energy], dtype=torch.long),
+            "bpm": torch.tensor(bpm_to_bin(float(st["bpm"])), dtype=torch.long),
+            "bpm_value": torch.tensor(float(st["bpm"]), dtype=torch.float32),
             "mode": torch.tensor(self.mode_i[mode], dtype=torch.long),
             "key": torch.tensor(self.key_i[st["key"]], dtype=torch.long),
             "prog": torch.tensor(self.prog_i[st["progression"]], dtype=torch.long),
@@ -196,7 +211,6 @@ class PriorPairDataset(Dataset):
             item[f"{head}_mask"] = torch.tensor(
                 1.0 if label_mask.get(head, True) else 0.0, dtype=torch.float32
             )
-        # accept 行は全ヘッド学習。extra で欠けた項目だけ 0。
         return item
 
 
@@ -233,28 +247,27 @@ def batch_loss(
     ce: nn.Module,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     out = model(batch["x"])
-    bpm_pred = torch.sigmoid(out["bpm"])
 
     def masked_ce(head: str) -> torch.Tensor:
         per = ce(out[head], batch[head])
         mask = batch[f"{head}_mask"]
         return (per * mask).sum() / mask.sum().clamp(min=1.0)
 
+    soft = bpm_soft_targets(batch["bpm"], N_BPM_BINS)
+    log_p = F.log_softmax(out["bpm"], dim=-1)
+    bpm_per = -(soft * log_p).sum(dim=-1)
     bpm_mask = batch["bpm_mask"]
-    bpm_per = (bpm_pred - batch["bpm"]) ** 2
     bpm_loss = (bpm_per * bpm_mask).sum() / bpm_mask.sum().clamp(min=1.0)
 
     losses = {
         "bpm": bpm_loss,
-        "energy": masked_ce("energy"),
         "mode": masked_ce("mode"),
         "key": masked_ce("key"),
         "prog": masked_ce("prog"),
         "bpc": masked_ce("bpc"),
     }
     total = (
-        2.0 * losses["bpm"]
-        + 1.5 * losses["energy"]
+        2.5 * losses["bpm"]
         + 1.0 * losses["mode"]
         + 0.8 * losses["key"]
         + 0.6 * losses["prog"]
@@ -286,11 +299,18 @@ def evaluate(
         _, stats = batch_loss(model, batch, ce=ce)
         for k, v in stats.items():
             totals[k] += v
-        pred_bpm = torch.sigmoid(out["bpm"])
+        pred_bin = out["bpm"].argmax(-1)
         bpm_mask = batch["bpm_mask"]
-        bpm_abs += float(((pred_bpm - batch["bpm"]).abs() * bpm_mask).sum().item())
+        pred_bpm = torch.tensor(
+            [bin_to_bpm(int(i)) for i in pred_bin.detach().cpu().tolist()],
+            device=device,
+            dtype=torch.float32,
+        )
+        bpm_abs += float(((pred_bpm - batch["bpm_value"]).abs() * bpm_mask).sum().item())
         counted["bpm"] += float(bpm_mask.sum().item())
-        for name in ("energy", "mode", "key", "prog", "bpc"):
+        hit_bpm = (pred_bin == batch["bpm"]).float()
+        correct["bpm"] += float((hit_bpm * bpm_mask).sum().item())
+        for name in ("mode", "key", "prog", "bpc"):
             hit = (out[name].argmax(-1) == batch[name]).float()
             mask = batch.get(f"{name}_mask", torch.ones_like(hit))
             correct[name] += float((hit * mask).sum().item())
@@ -300,14 +320,15 @@ def evaluate(
         return {}
     nb = max(1, len(loader))
     metrics = {f"loss_{k}": totals[k] / nb for k in totals}
-    metrics["mae_bpm"] = (bpm_abs / max(1.0, counted["bpm"])) * (BPM_HI - BPM_LO)
-    for name in ("energy", "mode", "key", "prog", "bpc"):
+    metrics["mae_bpm"] = bpm_abs / max(1.0, counted["bpm"])
+    metrics["acc_bpm"] = correct["bpm"] / max(1.0, counted["bpm"])
+    for name in ("mode", "key", "prog", "bpc"):
         metrics[f"acc_{name}"] = correct[name] / max(1.0, counted[name])
     return metrics
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train VA→structure prior")
+    parser = argparse.ArgumentParser(description="Train VA→structure prior (BPM bins)")
     parser.add_argument(
         "--jsonl",
         type=Path,
@@ -344,6 +365,9 @@ def main() -> None:
     if args.extra_jsonl:
         for extra_path in args.extra_jsonl:
             extra_p = extra_path if extra_path.is_absolute() else (ROOT / extra_path)
+            if "high_bpm" in extra_p.as_posix().lower():
+                print(f"[警告] high_bpm は分布学習では推奨しません（スキップ）: {extra_p}")
+                continue
             if extra_p.is_file():
                 extra = load_extra_rows(extra_p)
                 print(f"extra rows={len(extra)} from {extra_p}")
@@ -352,6 +376,7 @@ def main() -> None:
                 print(f"[警告] extra-jsonl が見つかりません: {extra_p}")
     print(f"合計 rows={len(rows)}")
     print("va_quadrant", dict(Counter(va_quadrant(*row_va(r)) for r in rows)))
+    print(f"bpm_bins={N_BPM_BINS} edges={list(BPM_BIN_EDGES)}")
 
     train_idx, val_idx = stratified_split(rows, val_ratio=args.val_ratio, seed=args.seed)
     ds = PriorPairDataset(rows)
@@ -408,7 +433,7 @@ def main() -> None:
         if epoch == 1 or epoch % 10 == 0 or epoch == args.epochs:
             print(
                 f"epoch {epoch:03d}  train={train_loss:.4f}  val={val_loss:.4f}  "
-                f"acc_energy={val_m.get('acc_energy', 0):.2f}  "
+                f"acc_bpm={val_m.get('acc_bpm', 0):.2f}  "
                 f"acc_mode={val_m.get('acc_mode', 0):.2f}  "
                 f"mae_bpm={val_m.get('mae_bpm', 0):.1f}  "
                 f"acc_prog={val_m.get('acc_prog', 0):.2f}"
@@ -427,6 +452,10 @@ def main() -> None:
             "in_dim": in_dim,
             "hidden": args.hidden,
             "feature": "va2",
+            "bpm_head": "bins",
+            "n_bpm_bins": N_BPM_BINS,
+            "bpm_bin_edges": list(BPM_BIN_EDGES),
+            "energy": "from_bpm",
             "extra_jsonl": [str(p) for p in (args.extra_jsonl or [])],
             "epochs": args.epochs,
             "lr": args.lr,
@@ -437,7 +466,6 @@ def main() -> None:
             "progressions": list(PROGRESSIONS),
             "keys": list(KEYS),
             "modes": list(MODES),
-            "energies": list(ENERGIES),
             "bpm_range": [BPM_LO, BPM_HI],
         },
     }
@@ -456,12 +484,14 @@ def main() -> None:
             model,
             va=(v, a),
             device=device,
+            sample=False,
         )
         gold = row["structure"]
         print(
             f"sample[{lab} V={v:+.2f} A={a:+.2f}] pred bpm={pred.bpm} energy={pred.energy} "
             f"mode={pred.mode} prog={pred.progression} | gold bpm={gold['bpm']} "
-            f"energy={gold.get('energy')} mode={gold.get('mode')} prog={gold['progression']}"
+            f"energy={energy_from_bpm(float(gold['bpm']))} mode={gold.get('mode')} "
+            f"prog={gold['progression']}"
         )
 
 

@@ -4,6 +4,7 @@ Trained on gated prior_pairs accept rows + EMOPIA pairs.
 Inference for the final pipeline (文 → VA encoder → V/A → prior → backing/lead).
 
 v2: 入力は VA 2次元（感情エンコーダがテキストから直接回帰）。
+v3: BPM は条件つきビン分布からサンプル。energy は BPM から導出（学習ヘッドなし）。
 """
 
 from __future__ import annotations
@@ -73,9 +74,31 @@ MODES: tuple[str, ...] = ("major", "natural_minor")
 ENERGIES: tuple[str, ...] = ("low", "mid", "high")
 BARS_PER_CHORD: tuple[int, ...] = (1, 2)
 
-# VGMIDI 実テンポを折り込まず学習するため広め。推論時もこの範囲で unit↔BPM。
 BPM_LO = 40.0
 BPM_HI = 240.0
+# 中央は約 10 BPM 刻み、端（〜50・200〜）は広め
+BPM_BIN_EDGES: tuple[float, ...] = (
+    40.0,
+    50.0,
+    60.0,
+    70.0,
+    80.0,
+    90.0,
+    100.0,
+    110.0,
+    120.0,
+    130.0,
+    140.0,
+    150.0,
+    160.0,
+    170.0,
+    180.0,
+    190.0,
+    200.0,
+    220.0,
+    240.0,
+)
+N_BPM_BINS = len(BPM_BIN_EDGES) - 1
 
 _PROGRESSION_FAMILY: dict[str, str] = {
     **{
@@ -107,6 +130,37 @@ class StructurePriorOut:
         return asdict(self)
 
 
+def energy_from_bpm(bpm: float) -> str:
+    b = float(bpm)
+    if b < 90.0:
+        return "low"
+    if b < 120.0:
+        return "mid"
+    return "high"
+
+
+def bpm_to_bin(bpm: float) -> int:
+    """BPM → ビン index（[lo, hi) 、最後のビンは hi を含む）。"""
+    b = max(BPM_LO, min(BPM_HI, float(bpm)))
+    for i in range(N_BPM_BINS):
+        lo = BPM_BIN_EDGES[i]
+        hi = BPM_BIN_EDGES[i + 1]
+        if i == N_BPM_BINS - 1:
+            if lo <= b <= hi:
+                return i
+        elif lo <= b < hi:
+            return i
+    return N_BPM_BINS - 1
+
+
+def bin_to_bpm(bin_i: int) -> float:
+    """ビン代表値（区間中央）。"""
+    i = max(0, min(N_BPM_BINS - 1, int(bin_i)))
+    lo = BPM_BIN_EDGES[i]
+    hi = BPM_BIN_EDGES[i + 1]
+    return round((lo + hi) * 0.5, 1)
+
+
 def bpm_to_unit(bpm: float) -> float:
     return max(0.0, min(1.0, (float(bpm) - BPM_LO) / (BPM_HI - BPM_LO)))
 
@@ -129,13 +183,14 @@ class StructurePriorNet(nn.Module):
         in_dim: int = FEATURE_DIM,
         *,
         hidden: int = 64,
+        n_bpm: int = N_BPM_BINS,
         n_prog: int = len(PROGRESSIONS),
         n_key: int = len(KEYS),
         n_mode: int = len(MODES),
-        n_energy: int = len(ENERGIES),
         n_bpc: int = len(BARS_PER_CHORD),
     ) -> None:
         super().__init__()
+        self.n_bpm = int(n_bpm)
         self.backbone = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.ReLU(),
@@ -144,8 +199,7 @@ class StructurePriorNet(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.2),
         )
-        self.head_bpm = nn.Linear(hidden, 1)
-        self.head_energy = nn.Linear(hidden, n_energy)
+        self.head_bpm = nn.Linear(hidden, self.n_bpm)
         self.head_mode = nn.Linear(hidden, n_mode)
         self.head_key = nn.Linear(hidden, n_key)
         self.head_prog = nn.Linear(hidden, n_prog)
@@ -154,8 +208,7 @@ class StructurePriorNet(nn.Module):
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         h = self.backbone(x)
         return {
-            "bpm": self.head_bpm(h).squeeze(-1),
-            "energy": self.head_energy(h),
+            "bpm": self.head_bpm(h),
             "mode": self.head_mode(h),
             "key": self.head_key(h),
             "prog": self.head_prog(h),
@@ -175,7 +228,7 @@ def decode_outputs(
     """Decode one sample from a batch logits dict (default: index 0).
 
     sample=False → argmax（決定的）
-    sample=True  → categorical / BPM ノイズ（同じ入力でも seed で別テイク）
+    sample=True  → categorical（同じ入力でも seed で別テイク）
     """
     temp = max(1e-6, float(temperature))
 
@@ -186,15 +239,8 @@ def decode_outputs(
         probs = torch.softmax(row / temp, dim=-1)
         return int(torch.multinomial(probs, 1, generator=generator).item())
 
-    bpm_mean = float(torch.sigmoid(out["bpm"].reshape(-1)[index]).item())
-    if sample:
-        noise_t = torch.randn((), generator=generator)
-        noise = float(noise_t.item()) * (0.05 * temp)
-        bpm_u = max(0.0, min(1.0, bpm_mean + noise))
-    else:
-        bpm_u = bpm_mean
-
-    ei = _idx(out["energy"])
+    bpm_i = _idx(out["bpm"])
+    bpm = bin_to_bpm(bpm_i)
     mi = _idx(out["mode"])
     ki = _idx(out["key"])
     pi = _idx(out["prog"])
@@ -204,12 +250,12 @@ def decode_outputs(
     return StructurePriorOut(
         progression=prog,
         key=KEYS[ki],
-        bpm=round(unit_to_bpm(bpm_u), 1),
+        bpm=bpm,
         bars=bars,
         bars_per_chord=BARS_PER_CHORD[bi],
         mode=MODES[mi],
         family=_PROGRESSION_FAMILY.get(prog, "diatonic_major"),
-        energy=ENERGIES[ei],
+        energy=energy_from_bpm(bpm),
     )
 
 
@@ -228,9 +274,29 @@ def load_prior(
             f"（期待値={FEATURE_DIM}: VA2）。"
             " train_structure_prior.py で再学習してください。"
         )
+    state = blob["model_state_dict"]
+    bpm_w = state.get("head_bpm.weight")
+    if bpm_w is None:
+        raise RuntimeError("structure prior checkpoint に head_bpm がありません。")
+    n_bpm = int(bpm_w.shape[0])
+    if n_bpm == 1:
+        raise RuntimeError(
+            "structure prior checkpoint は旧 BPM 回帰（1 次元）です。"
+            " ビン分布版で train_structure_prior.py を再学習してください。"
+        )
+    if n_bpm != N_BPM_BINS:
+        raise RuntimeError(
+            f"structure prior checkpoint の BPM ビン数={n_bpm} は非互換です "
+            f"（期待値={N_BPM_BINS}）。再学習してください。"
+        )
+    if "head_energy.weight" in state:
+        raise RuntimeError(
+            "structure prior checkpoint に旧 head_energy があります。"
+            " ビン分布版で再学習してください。"
+        )
     hidden = int(meta.get("hidden", 64))
-    model = StructurePriorNet(in_dim, hidden=hidden)
-    model.load_state_dict(blob["model_state_dict"])
+    model = StructurePriorNet(in_dim, hidden=hidden, n_bpm=n_bpm)
+    model.load_state_dict(state)
     model.eval()
     if device is not None:
         model.to(device)
