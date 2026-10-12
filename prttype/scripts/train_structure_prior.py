@@ -57,10 +57,25 @@ from structure_prior import (  # noqa: E402
 
 # 均等サンプリング対象（high_bpm は意図的に除外）
 EQUAL_SOURCES: frozenset[str] = frozenset(
-    ("accept", "vgmidi", "emopia", "pmemo", "deam", "fme24")
+    (
+        "accept",
+        "vgmidi",
+        "emopia",
+        "pmemo",
+        "deam",
+        "fme24",
+        "bal_high_fast",
+        "bal_highV_lowA",
+        "bal_lowV_highA",
+        "bal_lowV_lowA",
+    )
 )
 MASKABLE_HEADS: tuple[str, ...] = ("bpm", "mode", "key", "prog", "bpc")
 BPM_SOFT_NEIGHBOR = 0.15
+VA_SUM_HIGH = 0.4
+VA_SUM_LOW = -0.4
+BPM_SLOW = 90.0
+BPM_VERY_FAST = 150.0
 
 
 def row_va(row: dict[str, Any]) -> tuple[float, float]:
@@ -76,6 +91,37 @@ def va_quadrant(v: float, a: float) -> str:
     hv = "pos" if v >= 0 else "neg"
     ha = "high" if a >= 0 else "low"
     return f"{hv}_{ha}"
+
+
+def va_bpm_mismatch(v: float, a: float, bpm: float) -> bool:
+    """高 VA×遅 BPM / 低 VA×極端に速 BPM を学習から外す（va_boost 行は除外しない）。"""
+    s = v + a
+    if s >= VA_SUM_HIGH and bpm < BPM_SLOW:
+        return True
+    if s <= VA_SUM_LOW and bpm >= BPM_VERY_FAST:
+        return True
+    return False
+
+
+def filter_va_bpm_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for row in rows:
+        src = str(row.get("source") or "").lower()
+        if src in ("va_boost_high", "va_boost_low"):
+            kept.append(row)
+            continue
+        st = row.get("structure") or {}
+        bpm = st.get("bpm")
+        if bpm is None:
+            kept.append(row)
+            continue
+        v, a = row_va(row)
+        if va_bpm_mismatch(v, a, float(bpm)):
+            dropped += 1
+            continue
+        kept.append(row)
+    return kept, dropped
 
 
 def load_accept_rows(path: Path) -> list[dict[str, Any]]:
@@ -349,6 +395,11 @@ def main() -> None:
     parser.add_argument("--hidden", type=int, default=64)
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--no-filter-va-bpm-align",
+        action="store_true",
+        help="高VA×遅BPM / 低VA×速BPM の除外をしない",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -374,6 +425,11 @@ def main() -> None:
                 rows = rows + extra
             else:
                 print(f"[警告] extra-jsonl が見つかりません: {extra_p}")
+    if not args.no_filter_va_bpm_align:
+        before = len(rows)
+        rows, dropped = filter_va_bpm_rows(rows)
+        if dropped:
+            print(f"va_bpm_align: dropped {dropped} mismatch rows ({before} -> {len(rows)})")
     print(f"合計 rows={len(rows)}")
     print("va_quadrant", dict(Counter(va_quadrant(*row_va(r)) for r in rows)))
     print(f"bpm_bins={N_BPM_BINS} edges={list(BPM_BIN_EDGES)}")
