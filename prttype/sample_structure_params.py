@@ -12,7 +12,7 @@ from pathlib import Path
 
 from checkpoint_paths import resolve_structure_prior_checkpoint
 from makeData.constants import BPM_RANGE, KEYS
-from makeData.progressions import PROGRESSIONS, ProgressionSpec
+from makeData.progressions import PROGRESSIONS, ProgressionSpec, modes_allowed_for_spec
 from structure_prior import energy_from_bpm
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -37,7 +37,8 @@ def sample_structure_params(*, seed: int | None = None) -> StructureParams:
     """合成データ作成時と同系の候補から進行・キー・BPM をサンプルする（暫定フォールバック）。"""
     rng = random.Random(seed)
     spec: ProgressionSpec = rng.choice(list(PROGRESSIONS))
-    if spec.mode == "natural_minor":
+    mode = rng.choice(sorted(modes_allowed_for_spec(spec)))
+    if mode == "natural_minor":
         key_pool = [k for k in KEYS if k in ("A", "E", "D", "G", "C", "B", "F")]
     else:
         key_pool = list(KEYS)
@@ -52,7 +53,7 @@ def sample_structure_params(*, seed: int | None = None) -> StructureParams:
         bars=8,
         bars_per_chord=bars_per_chord,
         family=spec.family,
-        mode=spec.mode,
+        mode=mode,
         energy=energy,
         source="catalog",
         va=(0.0, 0.0),

@@ -529,18 +529,23 @@ def generate_progression_lead(
     leap_prob: float = 0.15,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
     power_chord_phrase_probability: float = LEAD_POWER_CHORD_PHRASE_PROBABILITY,
+    home_mode: str | None = None,
 ) -> muspy.Music:
     """反復・変奏・息継ぎのある、進行スケール上の単音リードを生成する。
 
     2小節モチーフを基本単位にし、A → A' → B → cadence の流れを作る。
     onset は四分・八分・付点・16分相当を混ぜ、各モチーフ末尾に休符を残す。
     A' はAの輪郭とリズムを再利用しつつ、終止音だけ現在コードへ着地させる。
+    スケールは home_mode（β1）優先。コードルートは進行の chord_resolve_mode。
     """
+    from .progressions import performance_mode
+
     rng = rng or random.Random()
     track = make_guitar_track(f"prog_lead_{spec.name}")
-    scale = scale_pitches(key, spec.mode, base_octave=4)
+    scale_mode = performance_mode(spec, home_mode)
+    scale = scale_pitches(key, scale_mode, base_octave=4)
     if not scale:
-        scale = scale_pitches(key, spec.mode)
+        scale = scale_pitches(key, scale_mode)
     pitch_sets = progression_chord_pitch_sets(spec, key)
     chord_pc_sets = [set(p % 12 for p in ps) for ps in pitch_sets]
     power_pitch_sets = [

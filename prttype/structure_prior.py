@@ -5,6 +5,7 @@ Inference for the final pipeline (文 → VA encoder → V/A → prior → backi
 
 v2: 入力は VA 2次元（感情エンコーダがテキストから直接回帰）。
 v3: BPM は条件つきビン分布からサンプル。energy は BPM から導出（学習ヘッドなし）。
+v4: prog は mode one-hot 条件（C1）。推論で mode↔prog プール整合。
 """
 
 from __future__ import annotations
@@ -15,6 +16,9 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+from makeData.progressions import progression_ok_for_mode
 
 # valence + arousal の 2次元のみ
 FEATURE_DIM = 2
@@ -191,6 +195,8 @@ class StructurePriorNet(nn.Module):
     ) -> None:
         super().__init__()
         self.n_bpm = int(n_bpm)
+        self.n_mode = int(n_mode)
+        self.hidden = int(hidden)
         self.backbone = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.ReLU(),
@@ -202,18 +208,47 @@ class StructurePriorNet(nn.Module):
         self.head_bpm = nn.Linear(hidden, self.n_bpm)
         self.head_mode = nn.Linear(hidden, n_mode)
         self.head_key = nn.Linear(hidden, n_key)
-        self.head_prog = nn.Linear(hidden, n_prog)
+        # C1: prog は h + mode one-hot
+        self.head_prog = nn.Linear(hidden + n_mode, n_prog)
         self.head_bpc = nn.Linear(hidden, n_bpc)
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        mode_index: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """mode_index があれば teacher forcing（学習）。無ければ mode argmax で prog 条件付け。"""
         h = self.backbone(x)
+        mode_logits = self.head_mode(h)
+        if mode_index is None:
+            mode_index = mode_logits.argmax(dim=-1)
+        mode_oh = F.one_hot(mode_index.long(), num_classes=self.n_mode).float()
         return {
             "bpm": self.head_bpm(h),
-            "mode": self.head_mode(h),
+            "mode": mode_logits,
             "key": self.head_key(h),
-            "prog": self.head_prog(h),
+            "prog": self.head_prog(torch.cat([h, mode_oh], dim=-1)),
             "bpc": self.head_bpc(h),
+            "h": h,
         }
+
+    def prog_logits_for_mode(
+        self,
+        h: torch.Tensor,
+        mode_index: torch.Tensor,
+    ) -> torch.Tensor:
+        mode_oh = F.one_hot(mode_index.long(), num_classes=self.n_mode).float()
+        if mode_oh.device != h.device:
+            mode_oh = mode_oh.to(h.device)
+        return self.head_prog(torch.cat([h, mode_oh], dim=-1))
+
+
+def _prog_mask_for_mode(mode: str) -> torch.Tensor:
+    return torch.tensor(
+        [progression_ok_for_mode(p, mode) for p in PROGRESSIONS],
+        dtype=torch.bool,
+    )
 
 
 def decode_outputs(
@@ -224,16 +259,22 @@ def decode_outputs(
     sample: bool = False,
     temperature: float = 1.0,
     generator: torch.Generator | None = None,
+    model: StructurePriorNet | None = None,
 ) -> StructurePriorOut:
     """Decode one sample from a batch logits dict (default: index 0).
 
     sample=False → argmax（決定的）
     sample=True  → categorical（同じ入力でも seed で別テイク）
+
+    mode を先に決め、その mode で prog logit を取り直し（C1）＋プール外マスク。
     """
     temp = max(1e-6, float(temperature))
 
-    def _idx(logits: torch.Tensor) -> int:
+    def _idx(logits: torch.Tensor, *, mask: torch.Tensor | None = None) -> int:
         row = logits.reshape(-1, logits.shape[-1])[index].detach().float().cpu()
+        if mask is not None:
+            row = row.clone()
+            row[~mask.bool()] = -1e9
         if not sample:
             return int(row.argmax().item())
         probs = torch.softmax(row / temp, dim=-1)
@@ -242,9 +283,23 @@ def decode_outputs(
     bpm_i = _idx(out["bpm"])
     bpm = bin_to_bpm(bpm_i)
     mi = _idx(out["mode"])
+    mode = MODES[mi]
     ki = _idx(out["key"])
-    pi = _idx(out["prog"])
     bi = _idx(out["bpc"])
+
+    prog_logits = out["prog"]
+    if model is not None and "h" in out:
+        device = out["h"].device
+        mi_t = torch.tensor([mi], device=device, dtype=torch.long)
+        # batch の index 行だけ差し替え
+        h_row = out["h"][index : index + 1]
+        prog_row = model.prog_logits_for_mode(h_row, mi_t)
+        prog_logits = prog_row
+
+    prog_mask = _prog_mask_for_mode(mode)
+    if not bool(prog_mask.any()):
+        prog_mask = torch.ones(len(PROGRESSIONS), dtype=torch.bool)
+    pi = _idx(prog_logits, mask=prog_mask)
 
     prog = PROGRESSIONS[pi]
     return StructurePriorOut(
@@ -253,7 +308,7 @@ def decode_outputs(
         bpm=bpm,
         bars=bars,
         bars_per_chord=BARS_PER_CHORD[bi],
-        mode=MODES[mi],
+        mode=mode,
         family=_PROGRESSION_FAMILY.get(prog, "diatonic_major"),
         energy=energy_from_bpm(bpm),
     )
@@ -294,7 +349,14 @@ def load_prior(
             "structure prior checkpoint に旧 head_energy があります。"
             " ビン分布版で再学習してください。"
         )
+    prog_w = state.get("head_prog.weight")
     hidden = int(meta.get("hidden", 64))
+    expected_prog_in = hidden + len(MODES)
+    if prog_w is None or int(prog_w.shape[1]) != expected_prog_in:
+        raise RuntimeError(
+            "structure prior checkpoint は旧 prog ヘッド（mode 条件なし）です。"
+            " mode 条件付き（C1）で train_structure_prior.py を再学習してください。"
+        )
     model = StructurePriorNet(in_dim, hidden=hidden, n_bpm=n_bpm)
     model.load_state_dict(state)
     model.eval()
@@ -330,4 +392,5 @@ def predict_structure(
         sample=sample,
         temperature=temperature,
         generator=gen,
+        model=model,
     )

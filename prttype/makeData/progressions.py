@@ -16,13 +16,65 @@ Degree = tuple[int, int, str]  # (scale_degree 1-7, accidental, quality)
 class ProgressionSpec:
     name: str
     family: str  # diatonic_major | diatonic_minor | borrowed | blues
-    mode: str  # major | natural_minor（生成時のスケール前提）
+    mode: str  # major | natural_minor（primary / 合成デフォルト・コード解決の既定）
     degrees: tuple[Degree, ...]
     weight: float = 1.0
 
 
 def _d(degree: int, quality: str, accidental: int = 0) -> Degree:
     return (degree, accidental, quality)
+
+
+# borrowed / blues は両 mode 可（選出）。コードルートは常に major 解決（β1）。
+_DUAL_MODE_FAMILIES: frozenset[str] = frozenset({"borrowed", "blues"})
+
+
+def modes_allowed_for_spec(spec: ProgressionSpec) -> frozenset[str]:
+    """prior / 構成でこの進行を選んでよい mode 集合。"""
+    if spec.family in _DUAL_MODE_FAMILIES:
+        return frozenset({"major", "natural_minor"})
+    if spec.mode == "natural_minor" or spec.family == "diatonic_minor":
+        return frozenset({"natural_minor"})
+    return frozenset({"major"})
+
+
+def modes_allowed_for_name(name: str) -> frozenset[str]:
+    spec = PROGRESSION_BY_NAME.get(name)
+    if spec is None:
+        if name.startswith("minor_"):
+            return frozenset({"natural_minor"})
+        if name.startswith("rock_") or name.startswith("blues_"):
+            return frozenset({"major", "natural_minor"})
+        return frozenset({"major"})
+    return modes_allowed_for_spec(spec)
+
+
+def progression_ok_for_mode(name: str, mode: str) -> bool:
+    return mode in modes_allowed_for_name(name)
+
+
+def e3_canonical_mode(progression: str, mode: str | None) -> str:
+    """E3: 進行を正として mode を正規化。両 mode 可は合法なら維持、欠落は major。"""
+    allowed = modes_allowed_for_name(progression)
+    if mode in allowed:
+        return str(mode)
+    if len(allowed) == 1:
+        return next(iter(allowed))
+    return "major"
+
+
+def chord_resolve_mode(spec: ProgressionSpec) -> str:
+    """コード展開に使う mode。borrowed/blues は常に major（β1 のルート形）。"""
+    if spec.family in _DUAL_MODE_FAMILIES:
+        return "major"
+    return spec.mode
+
+
+def performance_mode(spec: ProgressionSpec, home_mode: str | None) -> str:
+    """スケール／主感。home_mode があればそれを優先（β1）。"""
+    if home_mode in ("major", "natural_minor"):
+        return home_mode
+    return spec.mode
 
 
 # --- Major diatonic ---
@@ -310,16 +362,21 @@ def minor_tonic_as_relative(major_tonic: str) -> str:
 def resolve_progression_chords(
     spec: ProgressionSpec,
     key: str,
+    *,
+    home_mode: str | None = None,
 ) -> list[tuple[str, str]]:
     """進行を (chord_root_key, quality) の列に展開する。
 
-    - major 系: ``key`` を長調トニックとして解釈
-    - natural_minor 系: ``key`` を短調トニックとして解釈
+    - diatonic_minor: ``key`` を短調トニックとして解釈
       （内部では平行長調の度数で計算するため、短調 i を major の vi 相当に写す）
+    - major / borrowed / blues: ``key`` を長調トニックとして解釈（β1）
+    - ``home_mode`` は API 対称用（ルートには使わない。スケールは performance_mode）
     """
+    _ = home_mode
     chords: list[tuple[str, str]] = []
+    resolve_as = chord_resolve_mode(spec)
 
-    if spec.mode == "natural_minor":
+    if resolve_as == "natural_minor":
         # key = Am のとき、平行長調は C。度数は「短調の i=1」を
         # 平行長調の vi=6 にオフセットしてから major 度数表で解決する。
         minor_tonic_pc = KEY_TO_SEMITONE[key]

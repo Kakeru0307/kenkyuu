@@ -11,8 +11,10 @@ Usage:
     --checkpoint-dir checkpoints/structure_prior
 
 BPM はビン分類（soft label）。energy は学習しない（推論時に BPM から導出）。
+E3: 進行を正として mode を正規化（borrowed/blues は両 mode 可）。
+C1: prog ヘッドは mode one-hot 条件。学習は gold mode で teacher forcing。
 extra 行で欠けた項目（BPM・mode・key・prog・bpc）は損失から除外する。
-ソース均等サンプリング: accept / vgmidi / emopia / pmemo / deam / fme24
+ソース均等サンプリング: accept / vgmidi / emopia / pmemo / deam / fme24 / bal_*
 （high_bpm は分布を歪めるため均等ソースに含めない・推奨しない）
 """
 
@@ -37,6 +39,7 @@ if ROOT.name == "scripts":
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from makeData.progressions import e3_canonical_mode  # noqa: E402
 from structure_prior import (  # noqa: E402
     BARS_PER_CHORD,
     BPM_BIN_EDGES,
@@ -122,6 +125,35 @@ def filter_va_bpm_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
             continue
         kept.append(row)
     return kept, dropped
+
+
+def apply_e3_mode_normalize(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """E3: 進行を正として mode を正規化。書き換え件数を返す。"""
+    fixed = 0
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        st = dict(row.get("structure") or {})
+        prog = st.get("progression")
+        mask = dict(row.get("_label_mask") or {})
+        has_prog = prog in PROGRESSIONS and mask.get("prog", True)
+        has_mode_label = mask.get("mode", True) if mask else (st.get("mode") in MODES)
+        # accept 行は mask 無し＝両ラベルありとみなす
+        if not mask:
+            has_prog = prog in PROGRESSIONS
+            has_mode_label = True
+        if has_prog and prog in PROGRESSIONS:
+            old = st.get("mode")
+            new = e3_canonical_mode(str(prog), old if old in MODES else None)
+            if old != new:
+                fixed += 1
+                st["mode"] = new
+            elif old not in MODES:
+                st["mode"] = new
+                if has_mode_label:
+                    fixed += 1
+            row = {**row, "structure": st}
+        out.append(row)
+    return out, fixed
 
 
 def load_accept_rows(path: Path) -> list[dict[str, Any]]:
@@ -292,7 +324,8 @@ def batch_loss(
     *,
     ce: nn.Module,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    out = model(batch["x"])
+    # C1: prog は gold mode で teacher forcing
+    out = model(batch["x"], mode_index=batch["mode"])
 
     def masked_ce(head: str) -> torch.Tensor:
         per = ce(out[head], batch[head])
@@ -341,7 +374,7 @@ def evaluate(
     bpm_abs = 0.0
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
-        out = model(batch["x"])
+        out = model(batch["x"], mode_index=batch["mode"])
         _, stats = batch_loss(model, batch, ce=ce)
         for k, v in stats.items():
             totals[k] += v
@@ -430,6 +463,9 @@ def main() -> None:
         rows, dropped = filter_va_bpm_rows(rows)
         if dropped:
             print(f"va_bpm_align: dropped {dropped} mismatch rows ({before} -> {len(rows)})")
+    rows, e3_fixed = apply_e3_mode_normalize(rows)
+    if e3_fixed:
+        print(f"e3_mode_normalize: rewrote mode on {e3_fixed} rows")
     print(f"合計 rows={len(rows)}")
     print("va_quadrant", dict(Counter(va_quadrant(*row_va(r)) for r in rows)))
     print(f"bpm_bins={N_BPM_BINS} edges={list(BPM_BIN_EDGES)}")
@@ -512,6 +548,8 @@ def main() -> None:
             "n_bpm_bins": N_BPM_BINS,
             "bpm_bin_edges": list(BPM_BIN_EDGES),
             "energy": "from_bpm",
+            "prog_cond": "mode_oh",
+            "e3_mode_normalize": True,
             "extra_jsonl": [str(p) for p in (args.extra_jsonl or [])],
             "epochs": args.epochs,
             "lr": args.lr,

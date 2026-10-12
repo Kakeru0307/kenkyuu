@@ -154,15 +154,21 @@ def _energy_for_bpm(bpm: float, choices: tuple[str, ...], rng: random.Random) ->
 
 
 def _sample_structure_for_va(v: float, a: float, rng: random.Random) -> dict:
+    from makeData.progressions import modes_allowed_for_spec
+
     pref = _va_to_struct_range(v, a)
     modes = pref["modes"]
-    pool = [p for p in PROGRESSIONS if p.mode in modes] or list(PROGRESSIONS)
+    pool = [
+        p for p in PROGRESSIONS if any(m in modes_allowed_for_spec(p) for m in modes)
+    ] or list(PROGRESSIONS)
     if a > 0.3 and v < -0.1:
         boosted = [p for p in pool if p.family in ("borrowed", "blues", "diatonic_minor")]
         if boosted:
             pool = boosted + pool
     spec: ProgressionSpec = rng.choice(pool)
-    if spec.mode == "natural_minor":
+    allowed = modes_allowed_for_spec(spec)
+    mode = rng.choice([m for m in modes if m in allowed] or sorted(allowed))
+    if mode == "natural_minor":
         key_pool = [k for k in KEYS if k in ("A", "E", "D", "G", "C", "B", "F")]
     else:
         key_pool = list(KEYS)
@@ -177,7 +183,7 @@ def _sample_structure_for_va(v: float, a: float, rng: random.Random) -> dict:
         "bpm": bpm,
         "bars": 8,
         "bars_per_chord": bars_per_chord,
-        "mode": spec.mode,
+        "mode": mode,
         "family": spec.family,
         "energy": energy,
     }

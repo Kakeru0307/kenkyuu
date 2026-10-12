@@ -11,7 +11,11 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Literal
 
-from makeData.progressions import PROGRESSIONS, ProgressionSpec
+from makeData.progressions import (
+    PROGRESSIONS,
+    ProgressionSpec,
+    modes_allowed_for_spec,
+)
 
 EnergyLevel = Literal["low", "mid", "high"]
 SectionRole = Literal["intro", "a", "b", "bridge", "chorus", "outro"]
@@ -137,8 +141,8 @@ class SongForm:
 
 
 def list_progressions_for_mode(mode: str) -> list[ProgressionSpec]:
-    """同 mode の進行カタログを返す。"""
-    return [s for s in PROGRESSIONS if s.mode == mode]
+    """同 mode で選んでよい進行（borrowed/blues は両 mode）。"""
+    return [s for s in PROGRESSIONS if mode in modes_allowed_for_spec(s)]
 
 
 def pick_contrast(

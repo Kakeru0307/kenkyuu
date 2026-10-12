@@ -122,13 +122,16 @@ def generate_bass_line(
     kick_times: set[int] | frozenset[int] | None = None,
     seed: int | None = None,
     rng: random.Random | None = None,
+    home_mode: str | None = None,
 ) -> muspy.Music:
-    """コードルート中心のベースラインを生成する。"""
+    """コードルート中心のベースラインを生成する。スケール音は home_mode（β1）。"""
+    from .progressions import performance_mode
+
     rng = rng or random.Random(seed)
     track = make_bass_track()
     roots = _chord_roots_for_bars(spec, key, bars, bars_per_chord)
     next_roots = roots[1:] + [roots[0]]
-    mode = spec.mode
+    mode = performance_mode(spec, home_mode)
     vel = _velocity_for_energy(energy, rng)
 
     for bar in range(bars):
