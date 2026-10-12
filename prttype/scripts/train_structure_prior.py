@@ -97,11 +97,12 @@ def va_quadrant(v: float, a: float) -> str:
 
 
 def va_bpm_mismatch(v: float, a: float, bpm: float) -> bool:
-    """高 VA×遅 BPM / 低 VA×極端に速 BPM を学習から外す（va_boost 行は除外しない）。"""
+    """明らかな矛盾だけ外す。低V高A×速いのは残す。"""
     s = v + a
     if s >= VA_SUM_HIGH and bpm < BPM_SLOW:
         return True
-    if s <= VA_SUM_LOW and bpm >= BPM_VERY_FAST:
+    # 低V低A×超速のみ落とす（低V高Aの緊張×速さは学習に残す）
+    if v < 0.0 and a < 0.0 and bpm >= BPM_VERY_FAST:
         return True
     return False
 

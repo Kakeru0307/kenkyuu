@@ -61,8 +61,9 @@ def classify(v: float, a: float, bpm: float) -> str:
     bb = bpm_band(bpm)
     if s >= VA_SUM_HIGH and bb == "slow":
         return "drop_high_va_slow"
-    if s <= VA_SUM_LOW and bb == "very_fast":
-        return "drop_low_va_very_fast"
+    # 低V低A×超速だけ落とす。低V高A×速は通す（緊張帯の速い例を殺さない）
+    if v < 0.0 and a < 0.0 and bb == "very_fast":
+        return "drop_lowV_lowA_very_fast"
     return "keep"
 
 
@@ -131,14 +132,8 @@ def sample_n(
 
 
 def prefer_calm(row: dict[str, Any]) -> float:
-    """低め BPM を優先（高V低A・低V系向け）。"""
+    """低め BPM を優先（高V低A・低V低A向け）。"""
     return float(row["structure"]["bpm"])
-
-
-def prefer_mid_energy(row: dict[str, Any]) -> float:
-    """低V高A: 極端な遅さ・速さより中央寄り。"""
-    b = float(row["structure"]["bpm"])
-    return abs(b - 125.0)
 
 
 def main() -> None:
@@ -205,7 +200,8 @@ def main() -> None:
 
     g_hVlA = sample_n(pool_minus("highV_lowA"), n, rng=rng, prefer_key=prefer_calm)
     used |= {row_key(r) for r in g_hVlA}
-    g_lVhA = sample_n(pool_minus("lowV_highA"), n, rng=rng, prefer_key=prefer_mid_energy)
+    # 低V高A: 中央寄せせずプールから一様サンプル（速い例も含む）
+    g_lVhA = sample_n(pool_minus("lowV_highA"), n, rng=rng)
     used |= {row_key(r) for r in g_lVhA}
     g_lVlA = sample_n(pool_minus("lowV_lowA"), n, rng=rng, prefer_key=prefer_calm)
     used |= {row_key(r) for r in g_lVlA}
@@ -265,7 +261,7 @@ def main() -> None:
 
 プール（重複なしコア後）: high_fast={len(pool_high_fast)}, highV_lowA={len(by_quad['highV_lowA'])}, lowV_highA={len(by_quad['lowV_highA'])}, lowV_lowA={len(by_quad['lowV_lowA'])}
 
-象限サンプルは BPM 整合寄り（低め／中央）を優先して {n} 件抽出。高VA×≥150 はプール全件が {n} 未満なら全採用。
+高V低A・低V低Aは低め BPM 優先。低V高Aは一様サンプル（≥150 専用バケットは作らない）。高VA×≥150 はプール全件が {n} 未満なら全採用。
 
 ## 学習コマンド例
 
