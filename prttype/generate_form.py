@@ -1,6 +1,7 @@
 """構成レイヤ入口: 雰囲気文 → 曲の色 → インスト構成 → 4パート連結 → 1本の MIDI。
 
-区間ごとに進行・beat_type・bars を変え、バッキング／リード／ドラム／ベースを連結する。
+区間ごとに進行・beat_type・奏法・bars を変え、バッキング／リード／ドラム／ベースを連結する。
+リードの奏法は区間が決め、保存後にそのトラックへ pitch bend として書く。
 キー・BPM は曲通し固定。bass/drum は常時生成。
 生成後に form_manifest.json を書き、form_gate_server で評価できる。
 """
@@ -120,6 +121,7 @@ def _write_form_manifest(
                 "progression": s.progression,
                 "bars": s.bars,
                 "beat_type": s.beat_type,
+                "technique_type": s.technique_type,
                 "energy": s.energy,
             }
             for s in form.sections
@@ -127,6 +129,34 @@ def _write_form_manifest(
         "gate": {"status": "pending", "score_fit": None, "note": ""},
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _apply_lead_section_techs(
+    midi_path: Path,
+    section_spans: list[tuple[int, int, str]],
+    *,
+    seed: int | None,
+) -> None:
+    """保存済み MIDI の Lead トラックへ、区間ごとの奏法を pitch bend として書く。"""
+    import pretty_midi
+
+    from guitar_tech.apply_midi import apply_section_techs_to_track
+
+    midi = pretty_midi.PrettyMIDI(str(midi_path))
+    spans = [
+        (
+            float(midi.tick_to_time(start)),
+            float(midi.tick_to_time(end)),
+            tech,
+        )
+        for start, end, tech in section_spans
+    ]
+    apply_section_techs_to_track(
+        midi_path,
+        spans,
+        track_name="Lead",
+        seed=seed,
+    )
 
 
 def generate_form(
@@ -181,7 +211,8 @@ def generate_form(
 
     music: muspy.Music | None = None
     bar_offset = 0
-    section_notes: list[tuple[str, str, str, int, int, int, int, int]] = []
+    section_notes: list[tuple[str, str, str, str, int, int, int, int, int]] = []
+    section_spans: list[tuple[int, int, str]] = []
 
     for i, section in enumerate(form.sections):
         section_seed = None if seed is None else int(seed) + i
@@ -264,11 +295,19 @@ def generate_form(
                 section.label,
                 section.progression,
                 section.beat_type,
+                section.technique_type,
                 section.bars,
                 n_backing,
                 n_lead,
                 n_drum,
                 n_bass,
+            )
+        )
+        section_spans.append(
+            (
+                tick_offset,
+                tick_offset + section.bars * TICKS_PER_BAR,
+                section.technique_type,
             )
         )
         bar_offset += section.bars
@@ -278,6 +317,7 @@ def generate_form(
 
     music.tempos = [muspy.Tempo(time=0, qpm=float(bpm))]
     save_music(music, output_path)
+    _apply_lead_section_techs(output_path, section_spans, seed=seed)
 
     manifest_path = output_path.with_suffix(".json")
     _write_form_manifest(
@@ -294,9 +334,9 @@ def generate_form(
 
     total = sum(len(t.notes) for t in music.tracks)
     print(f"[form] {form.describe()}")
-    for label, prog, beat, bars, n_b, n_l, n_d, n_ba in section_notes:
+    for label, prog, beat, tech, bars, n_b, n_l, n_d, n_ba in section_notes:
         print(
-            f"  {label}[{prog}|{beat}|{bars}]: "
+            f"  {label}[{prog}|{beat}|{tech}|{bars}]: "
             f"backing={n_b} lead={n_l} drum={n_d} bass={n_ba} notes"
         )
     print(f"home進行: {progression} / キー: {key} / BPM: {bpm}")

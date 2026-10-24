@@ -38,6 +38,17 @@ ROLE_ENERGY: dict[SectionRole, EnergyLevel] = {
     "outro": "low",
 }
 
+# role → リード奏法。guitar_tech.params.TECH_NAMES の名前を使う。
+# 区間が先に決め、生成後の pitch bend 書き込みへ渡す。
+ROLE_TECHNIQUE_CANDIDATES: dict[SectionRole, list[tuple[str, float]]] = {
+    "intro": [("none", 0.60), ("vibrato", 0.30), ("slide", 0.10)],
+    "a": [("none", 0.50), ("hammer", 0.25), ("vibrato", 0.15), ("slide", 0.10)],
+    "b": [("none", 0.35), ("vibrato", 0.25), ("choke", 0.20), ("hammer", 0.20)],
+    "bridge": [("vibrato", 0.40), ("choke", 0.30), ("none", 0.20), ("slide", 0.10)],
+    "chorus": [("choke", 0.30), ("choke_strong", 0.30), ("vibrato", 0.20), ("none", 0.20)],
+    "outro": [("none", 0.50), ("vibrato", 0.30), ("choke", 0.20)],
+}
+
 # role → beat_type 候補（重み付き）。energy / progression とは独立。
 ROLE_BEAT_CANDIDATES: dict[SectionRole, list[tuple[str, float]]] = {
     "intro": [
@@ -111,6 +122,7 @@ class FormSection:
     bars: int
     energy: EnergyLevel
     beat_type: str
+    technique_type: str
     progression: str
     label: str
 
@@ -132,7 +144,8 @@ class SongForm:
 
     def describe(self) -> str:
         parts = " → ".join(
-            f"{s.label}[{s.progression}|{s.beat_type}|{s.bars}]" for s in self.sections
+            f"{s.label}[{s.progression}|{s.beat_type}|{s.technique_type}|{s.bars}]"
+            for s in self.sections
         )
         return (
             f"{self.template_id} ({self.total_bars}bars, home={self.home_progression}): "
@@ -166,6 +179,15 @@ def pick_contrast(
 
 def _pick_beat_type(role: SectionRole, rng: random.Random | None) -> str:
     cands = ROLE_BEAT_CANDIDATES[role]
+    if rng is None:
+        return cands[0][0]
+    names = [c[0] for c in cands]
+    weights = [c[1] for c in cands]
+    return rng.choices(names, weights=weights, k=1)[0]
+
+
+def _pick_technique_type(role: SectionRole, rng: random.Random | None) -> str:
+    cands = ROLE_TECHNIQUE_CANDIDATES[role]
     if rng is None:
         return cands[0][0]
     names = [c[0] for c in cands]
@@ -216,6 +238,7 @@ def _section(
         bars=_bars_for_role(role),
         energy=ROLE_ENERGY[role],
         beat_type=_pick_beat_type(role, rng),
+        technique_type=_pick_technique_type(role, rng),
         progression=_pick_progression_for_role(
             role,
             occurrence=occurrence,
