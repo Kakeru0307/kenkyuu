@@ -108,11 +108,19 @@ class CVAEUNet(nn.Module):
         return torch.cat([x, z_map], dim=1)
 
     def forward(
-        self, x: torch.Tensor, y: torch.Tensor
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        x_dec: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """学習時フォワード。
+
+        x_dec を指定すると、事後エンコーダは完全な x を見つつ、
+        デコーダにはマスク済みの x_dec を渡す（骨格隠しによる z 活性化）。
+        """
         mu, logvar = self.posterior(x, y)
         z = self.reparameterize(mu, logvar)
-        out = self.decoder(self._inject(x, z))
+        out = self.decoder(self._inject(x if x_dec is None else x_dec, z))
         return out, mu, logvar
 
     def sample(

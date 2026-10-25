@@ -58,6 +58,18 @@ def kl_weight(epoch: int, *, beta: float, anneal_epochs: int) -> float:
     return beta * min(1.0, epoch / anneal_epochs)
 
 
+def apply_time_mask(x: torch.Tensor, mask_ratio: float) -> torch.Tensor:
+    """骨格を時間軸方向にランダムマスクしてデコーダへ渡す。
+
+    各時刻を独立に確率 mask_ratio でゼロ化する。
+    エンコーダは常に完全な x を見るので、z に何を隠したかが押し込まれる。
+    """
+    b, _c, t, _p = x.shape
+    # keep[i, :, t_step, :] = 0 の確率が mask_ratio
+    keep = (torch.rand(b, 1, t, 1, device=x.device) > mask_ratio).float()
+    return x * keep
+
+
 def resolve_pair_dirs(
     data_dir: Path | None,
     pairs_dir: Path | None,
@@ -96,6 +108,7 @@ def train(
     beta: float = 1.0,
     kl_anneal_epochs: int = 10,
     require_power_cond: bool = False,
+    mask_ratio: float = 0.0,
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -148,7 +161,8 @@ def train(
 
             optimizer.zero_grad()
             if cvae:
-                outputs, mu, logvar = model(inputs, targets)
+                x_dec = apply_time_mask(inputs, mask_ratio) if mask_ratio > 0 else None
+                outputs, mu, logvar = model(inputs, targets, x_dec=x_dec)
                 recon = weighted_mse_loss(
                     outputs, targets,
                     pos_weight=pos_weight,
@@ -278,6 +292,12 @@ def main() -> None:
         default=10,
         help="beta を 0 から線形に増やす epoch 数（posterior collapse 回避）",
     )
+    parser.add_argument(
+        "--mask-ratio",
+        type=float,
+        default=0.0,
+        help="骨格の時間軸マスク率（0.0=なし, 0.5=半分隠す）。z を活性化して多様フレーズを促す",
+    )
     args = parser.parse_args()
 
     data_dir = args.data_dir
@@ -304,6 +324,7 @@ def main() -> None:
         beta=args.beta,
         kl_anneal_epochs=args.kl_anneal_epochs,
         require_power_cond=args.require_power_cond,
+        mask_ratio=args.mask_ratio,
     )
 
 
