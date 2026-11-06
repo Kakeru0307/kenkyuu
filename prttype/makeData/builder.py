@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import muspy
 
-from program_utils import GUITAR_PROGRAM
+from util.program_utils import GUITAR_PROGRAM
 
 from .constants import (
     DEFAULT_BARS,

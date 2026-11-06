@@ -1,0 +1,45 @@
+---
+description: prttype=推論 / colab_train=学習、util配置、FAD、不要物は削除
+alwaysApply: true
+---
+
+# prttype / Colab 役割と掃除
+
+## 役割
+
+| 場所 | やること |
+|---|---|
+| `prttype/` | 推論・生成（form 本線）。学習スクリプトや pairs 生成を置かない |
+| `colab_train/` | 学習・pairs・prepare。実行は Colab |
+| `prttype/util/` | patch I/O・program・density・checkpoint・progression・skeleton |
+
+- `sample_structure_params.py` は残す（prior / カタログ入口）
+- `skeleton` は推論の `predict_patches` 用に `util/` に残す
+- `template_prior` は削除済み。構成は `song_form` の固定重み＋VAルールのみ
+
+## 掃除
+
+- 不要コードは **stash せず削除**
+- 学習用の重複が `prttype` にあれば消して `colab_train` 側を正とする
+
+## FAD / MAD
+
+- 比較計画の自動評価「2つ」= **FAD と MAD**（MusPy / Chu の二層とは別）
+- FAD コマンドは venv 経由。引数は **WAV ディレクトリ2つ**（1曲点数は出さない）
+
+```text
+.\venv\Scripts\python.exe prttype\scripts\compute_fad.py <参照WAV dir> <生成WAV dir>
+```
+
+- 本番参照はロック・メタル想定。EMOPIA はテスト用のみ
+- MIDI→WAV は `prttype/scripts/midi_to_wav.py`（同じ SoundFont）
+- FAD の本番実行は **Colab GPU**（`colab_train/colab_fad.ipynb`）。WAV は Drive 経由
+- Colab ではシステム Python に fadtk を入れない（3.13.15 不可・`numpy>=2` 衝突）。
+  `requirements-fad.txt` + `scripts/setup_fad_venv.py` で **Python 3.11 venv** を作り、その `python` で `compute_fad.py` を回す
+
+## 進め方
+
+- ゴール進捗は **% のみ**（完了＝100%）
+- コマンド例に venv を忘れない
+- 再現用 `--seed` は必須にしない（付けるなら理由を言う）
+- 次回ゴール一覧のスライド置き場は **ギター奏法付与**側（比較計画ではない）

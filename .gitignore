@@ -49,3 +49,13 @@ Thumbs.db
 
 # VA encoder weights (gmendes9 XLM-RoBERTa-large ~2GB)
 prttype/checkpoints/va_encoder/
+
+# 大容量バイナリ（git 管理外）
+fad_wav.zip
+prttype/assets/soundfonts/
+prttype/eval/fad/ref_wav/
+prttype/eval/fad/gen_wav/
+prttype/eval/fad/ref_wav/convert/
+
+# 外部参照コード（サブプロジェクト・非管理）
+external/

@@ -13,15 +13,15 @@ from typing import Any
 
 import muspy
 
-from checkpoint_paths import resolve_part_checkpoint
+from util.checkpoint_paths import resolve_part_checkpoint
 from inference import MIDI_DIR, load_model, predict_patches
 from makeData.bass import root_in_bass_range
 from makeData.constants import BASS_PROGRAM, TICKS_PER_BAR
 from makeData.progressions import resolve_progression_chords
-from midi_to_patch import midi_to_patches
-from patch_to_midi import patches_to_music, save_music
-from progression_input import build_backing_skeleton_music, get_progression
-from program_utils import remap_tonal_program
+from util.midi_to_patch import midi_to_patches
+from util.patch_to_midi import patches_to_music, save_music
+from util.progression_input import build_backing_skeleton_music, get_progression
+from util.program_utils import remap_tonal_program
 from sample_structure_params import DEFAULT_PRIOR_CKPT, resolve_structure_params
 
 SCRIPT_DIR = Path(__file__).resolve().parent

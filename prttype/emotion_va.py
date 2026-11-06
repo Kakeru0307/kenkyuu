@@ -10,6 +10,7 @@ ckpt が無い場合はエラー（WRIME 等へのフォールバックはしな
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import torch
@@ -63,7 +64,15 @@ class XlmRobertaVaAnalyzer:
         self.device = torch.device(device)
 
         resolved = _resolve_va_ckpt(ckpt_path)
-        self.tokenizer = AutoTokenizer.from_pretrained(str(resolved))
+        # Windows + 非 ASCII パスだと SentencePiece がファイルを見失うため、
+        # ckpt ディレクトリに chdir してから slow tokenizer を読む。
+        # （fast 経路は tiktoken 変換に落ちて別件で壊れる）
+        prev_cwd = Path.cwd()
+        try:
+            os.chdir(resolved)
+            self.tokenizer = AutoTokenizer.from_pretrained(".", use_fast=False)
+        finally:
+            os.chdir(prev_cwd)
         config = XLMRobertaConfig.from_pretrained(str(resolved))
         state = torch.load(resolved / "pytorch_model.bin", map_location="cpu", weights_only=False)
 

@@ -13,13 +13,13 @@ from typing import Any
 
 import muspy
 
-from checkpoint_paths import resolve_part_checkpoint
+from util.checkpoint_paths import resolve_part_checkpoint
 from inference import MIDI_DIR, load_model, predict_drum_patches
 from makeData.constants import DRUM_KICK
 from makeData.drum import extract_kick_times  # re-export
-from midi_to_patch import midi_to_patches
-from patch_to_midi import patches_to_music, save_music
-from progression_input import build_backing_skeleton_music, get_progression
+from util.midi_to_patch import midi_to_patches
+from util.patch_to_midi import patches_to_music, save_music
+from util.progression_input import build_backing_skeleton_music, get_progression
 from sample_structure_params import DEFAULT_PRIOR_CKPT, resolve_structure_params
 
 SCRIPT_DIR = Path(__file__).resolve().parent

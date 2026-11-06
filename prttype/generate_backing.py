@@ -21,20 +21,20 @@ from typing import Any
 
 import muspy
 
-from checkpoint_paths import resolve_part_checkpoint, resolve_structure_prior_checkpoint
+from util.checkpoint_paths import resolve_part_checkpoint, resolve_structure_prior_checkpoint
 from inference import (
     MIDI_DIR,
     export_guitar_music,
     load_model,
     predict_patches,
 )
-from midi_to_patch import midi_to_patches
-from patch_to_midi import patches_to_music, save_music
-from progression_input import (
+from util.midi_to_patch import midi_to_patches
+from util.patch_to_midi import patches_to_music, save_music
+from util.progression_input import (
     build_backing_skeleton_music,
     get_progression,
 )
-from program_utils import (
+from util.program_utils import (
     GUITAR_OVERDRIVE_PROGRAM,
     remap_tonal_program,
 )
@@ -155,8 +155,12 @@ def generate_backing(
     release_gap_ticks: int = 1,
     model: Any | None = None,
     device: Any | None = None,
+    apply_tech: bool = True,
+    tech_checkpoint: Path | None = None,
+    tech_seed: int | None = None,
+    tech_none_bias: float = 0.0,
 ) -> Path:
-    """進行からバッキング MIDI を生成して保存する。"""
+    """進行からバッキング MIDI を生成して保存する（既定で奏法付与）。"""
     spec = get_progression(progression)
     chords = resolve_progression_chords(spec, key)
     chord_label = "-".join(
@@ -186,6 +190,18 @@ def generate_backing(
         device=device,
     )
     save_music(music, output_path)
+    if apply_tech:
+        from guitar_tech.apply_midi import apply_techniques_overwrite
+
+        apply_techniques_overwrite(
+            output_path,
+            checkpoint=tech_checkpoint,
+            seed=tech_seed if tech_seed is not None else seed,
+            none_bias=tech_none_bias,
+            role="backing",
+            instrument_name="Backing",
+        )
+        print(f"奏法付与: {output_path}（素は {output_path.stem}_bare.mid）")
 
     note_count = sum(len(t.notes) for t in music.tracks)
     print(f"進行: {progression} ({spec.family}, mode={spec.mode})")
@@ -253,6 +269,23 @@ def main() -> None:
         action="store_true",
         help="コード共通ピークデコードをOFF（従来の閾値+2tick分割）",
     )
+    parser.add_argument(
+        "--no-apply-tech",
+        action="store_true",
+        help="奏法付与をスキップ（既定は常時付与）",
+    )
+    parser.add_argument(
+        "--tech-checkpoint",
+        type=Path,
+        default=None,
+        help="奏法付与 ckpt（省略時: checkpoints/guitar_tech/guitar_tech_apply_last.pt）",
+    )
+    parser.add_argument(
+        "--tech-none-bias",
+        type=float,
+        default=0.0,
+        help="奏法付与: none logit バイアス（大きいほど控えめ）",
+    )
     args = parser.parse_args()
 
     params = resolve_structure_params(
@@ -279,6 +312,10 @@ def main() -> None:
         seed=args.seed,
         temperature=args.temperature,
         chord_peak_decode=not args.no_chord_peak_decode,
+        apply_tech=not args.no_apply_tech,
+        tech_checkpoint=args.tech_checkpoint,
+        tech_seed=args.seed,
+        tech_none_bias=args.tech_none_bias,
     )
 
 

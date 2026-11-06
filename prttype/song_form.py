@@ -251,33 +251,6 @@ def _section(
     )
 
 
-def _apply_template_mlp(
-    va: tuple[float, float],
-    base_weights: list[float],
-) -> list[float]:
-    """template_prior MLP ckpt があれば softmax 確率で重みを上書き。なければ base_weights をそのまま返す。"""
-    from checkpoint_paths import resolve_template_prior_checkpoint
-    ckpt_path = resolve_template_prior_checkpoint()
-    if not ckpt_path.is_file():
-        return base_weights
-    try:
-        import torch as _torch
-        from template_prior import TemplatePriorNet
-        n = len(_TEMPLATES)
-        checkpoint = _torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        model = TemplatePriorNet(n_templates=n)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        model.eval()
-        bpm_unit = float(checkpoint.get("bpm_unit", 0.5))
-        x = _torch.tensor([[va[0], va[1], bpm_unit]], dtype=_torch.float32)
-        with _torch.no_grad():
-            logits = model(x)
-            probs = _torch.softmax(logits, dim=-1).squeeze(0).tolist()
-        return [max(1e-6, float(p)) for p in probs]
-    except Exception:
-        return base_weights
-
-
 # (template_id, weight, roles...)
 _TEMPLATES: list[tuple[str, float, tuple[SectionRole, ...]]] = [
     ("short", 1.0, ("intro", "a", "chorus", "outro")),
@@ -327,7 +300,6 @@ def sample_song_form(
 
     home_progression / home_mode は必須。渡さなければ TypeError。
     va を渡すと VA ルールベースでテンプレ選択確率を調整する。
-    checkpoints/template_prior/template_prior_last.pt が存在すれば MLP で重みを上書き。
     """
     if not home_progression:
         raise ValueError("home_progression is required")
@@ -339,12 +311,7 @@ def sample_song_form(
     rng = random.Random(seed)
     ids = [t[0] for t in _TEMPLATES]
     base_weights = [t[1] for t in _TEMPLATES]
-
-    # VA ルールベース調整
     weights = _template_weights(va, base_weights)
-
-    # MLP フォールバック（ckpt があれば上書き）
-    weights = _apply_template_mlp(va, weights)
 
     chosen = rng.choices(ids, weights=weights, k=1)[0]
     for tid, _, roles in _TEMPLATES:

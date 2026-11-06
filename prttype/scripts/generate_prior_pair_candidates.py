@@ -26,7 +26,7 @@ from emotion_va import analyze_va
 from makeData.constants import KEYS
 from makeData.patterns import generate_progression_strum
 from makeData.progressions import PROGRESSIONS, ProgressionSpec
-from patch_to_midi import save_music
+from util.patch_to_midi import save_music
 
 OUT_ROOT = SCRIPT_DIR / "data" / "prior_pairs"
 MIDI_DIR = OUT_ROOT / "midi"
