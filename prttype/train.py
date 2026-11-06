@@ -10,7 +10,7 @@ from torch import optim
 
 from checkpoint_paths import part_ckpt_path, role_from_checkpoint_dir
 from dataset import PatchPairDataset, SinglePatchDataset, get_dataloader
-from model import DEFAULT_LATENT_DIM, build_cvae, build_unet
+from model import DEFAULT_LATENT_DIM, FiLMCVAEUNet, build_cvae, build_unet
 from program_utils import GUITAR_PROGRAM
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -109,6 +109,7 @@ def train(
     kl_anneal_epochs: int = 10,
     require_power_cond: bool = False,
     mask_ratio: float = 0.0,
+    use_film: bool = False,
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -135,8 +136,11 @@ def train(
         model = build_cvae(
             in_channels=input_channels,
             out_channels=11,
-            latent_dim=latent_dim, encoder_weights=encoder_weights
+            latent_dim=latent_dim,
+            encoder_weights=encoder_weights,
+            use_film=use_film,
         ).to(device)
+        print(f"モデル: {'FiLMCVAEUNet' if use_film else 'CVAEUNet'}")
     else:
         model = build_unet(
             in_channels=input_channels,
@@ -201,7 +205,7 @@ def train(
         "model_state_dict": model.state_dict(),
         "epochs": epochs,
         "lr": lr,
-        "model_type": "cvae" if cvae else "unet",
+        "model_type": ("cvae_film" if use_film else "cvae") if cvae else "unet",
         "in_channels": input_channels,
         "out_channels": 11,
         "role": role,
@@ -244,13 +248,13 @@ def main() -> None:
         "--onset-weight",
         type=float,
         default=1.0,
-        help="onset(値1)セルへの追加重み倍率。fine-tune 推奨値: 2.0",
+        help="onset セルへの追加重み倍率（デフォルト 1.0 = 無効）",
     )
     parser.add_argument(
         "--midbar-onset-bonus",
         type=float,
         default=1.0,
-        help="小節頭以外の onset への追加重み倍率。fine-tune 推奨値: 3.0",
+        help="小節頭以外の onset への追加重み倍率（デフォルト 1.0 = 無効）",
     )
     parser.add_argument(
         "--resume",
@@ -298,6 +302,11 @@ def main() -> None:
         default=0.0,
         help="骨格の時間軸マスク率（0.0=なし, 0.5=半分隠す）。z を活性化して多様フレーズを促す",
     )
+    parser.add_argument(
+        "--use-film",
+        action="store_true",
+        help="FiLMCVAEUNet を使用する。z を全デコーダ層に注入して posterior collapse を防ぐ",
+    )
     args = parser.parse_args()
 
     data_dir = args.data_dir
@@ -325,6 +334,7 @@ def main() -> None:
         kl_anneal_epochs=args.kl_anneal_epochs,
         require_power_cond=args.require_power_cond,
         mask_ratio=args.mask_ratio,
+        use_film=args.use_film,
     )
 
 

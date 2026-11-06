@@ -20,7 +20,7 @@ from midi_to_patch import (
     midi_to_patches,
     normalize_pianoroll,
 )
-from model import CVAEUNet, build_cvae, build_unet
+from model import CVAEUNet, FiLMCVAEUNet, build_cvae, build_unet
 from patch_to_midi import patches_to_music, save_music
 from skeleton import PAIR_MODES, make_input_tonal
 from density_cond import midi_tempo_bpm
@@ -101,7 +101,14 @@ def _infer_in_channels(state_dict: dict) -> int | None:
 def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state = checkpoint["model_state_dict"]
-    if checkpoint.get("model_type") in ("cvae", "cvae_drum"):
+    if checkpoint.get("model_type") == "cvae_film":
+        model = build_cvae(
+            in_channels=int(checkpoint.get("in_channels", 11)),
+            out_channels=int(checkpoint.get("out_channels", 11)),
+            latent_dim=int(checkpoint.get("latent_dim", 16)),
+            use_film=True,
+        )
+    elif checkpoint.get("model_type") in ("cvae", "cvae_drum"):
         model = build_cvae(
             in_channels=int(checkpoint.get("in_channels", 11)),
             out_channels=int(checkpoint.get("out_channels", 11)),
@@ -209,7 +216,7 @@ def predict_patches(
     if guitar_only and bass_only:
         raise ValueError("guitar_only と bass_only は同時に True にできません")
 
-    is_cvae = isinstance(model, CVAEUNet)
+    is_cvae = isinstance(model, (CVAEUNet, FiLMCVAEUNet))
     if is_cvae and seed is not None:
         torch.manual_seed(seed)
 
@@ -319,7 +326,7 @@ def predict_drum_patches(
     入力は tonal11 + BPM1 + beat_onehot12 = 24ch（旧 12ch ckpt は非互換）。
     CVAE ckpt の場合は model.sample() を呼ぶため同じ入力でも毎回出力が変わる。
     """
-    is_cvae = isinstance(model, CVAEUNet)
+    is_cvae = isinstance(model, (CVAEUNet, FiLMCVAEUNet))
     predicted: list[MidiPatch] = []
     with torch.no_grad():
         for patch in patches:
