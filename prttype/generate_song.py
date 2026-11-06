@@ -11,13 +11,13 @@ from pathlib import Path
 
 import muspy
 
-from checkpoint_paths import resolve_part_checkpoint
+from util.checkpoint_paths import resolve_part_checkpoint
 from generate_backing import generate_backing
 from generate_lead import generate_lead
 from inference import MIDI_DIR
-from midi_music_utils import power_chord_attack_times
-from patch_to_midi import save_music
-from program_utils import (
+from util.midi_music_utils import power_chord_attack_times
+from util.patch_to_midi import save_music
+from util.program_utils import (
     GUITAR_OVERDRIVE_PROGRAM,
 )
 from sample_structure_params import DEFAULT_PRIOR_CKPT, resolve_structure_params
@@ -51,8 +51,12 @@ def generate_song(
     with_backing: bool = True,
     eval_muspy: bool = False,
     mode: str | None = None,
+    apply_tech: bool = True,
+    tech_checkpoint: Path | None = None,
+    tech_seed: int | None = None,
+    tech_none_bias: float = 0.0,
 ) -> Path:
-    """backing + lead を生成して 2 トラック MIDI に統合する。"""
+    """backing + lead を生成して 2 トラック MIDI に統合する（ギターは既定で奏法付与）。"""
     MIDI_DIR.mkdir(parents=True, exist_ok=True)
     stem = f"song_{progression}_{key}_bpm{int(bpm):03d}_{bars}bars"
     output_path = output or (MIDI_DIR / f"{stem}.mid")
@@ -69,6 +73,10 @@ def generate_song(
             bars_per_chord=bars_per_chord,
             checkpoint=backing_ckpt,
             guitar_program=GUITAR_OVERDRIVE_PROGRAM,
+            apply_tech=apply_tech,
+            tech_checkpoint=tech_checkpoint,
+            tech_seed=tech_seed,
+            tech_none_bias=tech_none_bias,
         )
         tracks += _load_tracks(backing_path, "Backing")
         blocked_power_onsets = power_chord_attack_times(muspy.read_midi(backing_path))
@@ -85,6 +93,10 @@ def generate_song(
             guitar_program=GUITAR_OVERDRIVE_PROGRAM,
             onset_th=lead_onset_th,
             blocked_power_onsets=blocked_power_onsets,
+            apply_tech=apply_tech,
+            tech_checkpoint=tech_checkpoint,
+            tech_seed=None if tech_seed is None else tech_seed + 17,
+            tech_none_bias=tech_none_bias,
         )
         tracks += _load_tracks(lead_path, "Lead")
 
@@ -161,6 +173,13 @@ def main() -> None:
         action="store_true",
         help="生成後に MusPy 客観評価を表示",
     )
+    parser.add_argument(
+        "--no-apply-tech",
+        action="store_true",
+        help="ギター奏法付与をスキップ（既定は常時付与）",
+    )
+    parser.add_argument("--tech-checkpoint", type=Path, default=None)
+    parser.add_argument("--tech-none-bias", type=float, default=0.0)
     args = parser.parse_args()
 
     params = resolve_structure_params(
@@ -190,6 +209,10 @@ def main() -> None:
         with_backing=not args.no_backing,
         eval_muspy=args.eval,
         mode=params.mode or None,
+        apply_tech=not args.no_apply_tech,
+        tech_checkpoint=args.tech_checkpoint,
+        tech_seed=args.seed,
+        tech_none_bias=args.tech_none_bias,
     )
 
 

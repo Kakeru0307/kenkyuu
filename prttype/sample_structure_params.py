@@ -10,7 +10,7 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
-from checkpoint_paths import resolve_structure_prior_checkpoint
+from util.checkpoint_paths import resolve_structure_prior_checkpoint
 from makeData.constants import BPM_RANGE, KEYS
 from makeData.progressions import PROGRESSIONS, ProgressionSpec, modes_allowed_for_spec
 from structure_prior import energy_from_bpm

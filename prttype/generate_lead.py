@@ -12,20 +12,20 @@ from pathlib import Path
 
 import muspy
 
-from checkpoint_paths import resolve_part_checkpoint, resolve_structure_prior_checkpoint
+from util.checkpoint_paths import resolve_part_checkpoint, resolve_structure_prior_checkpoint
 from inference import (
     MIDI_DIR,
     export_guitar_music,
     load_model,
     predict_patches,
 )
-from midi_to_patch import midi_to_patches
-from patch_to_midi import patches_to_music, save_music
-from progression_input import (
+from util.midi_to_patch import midi_to_patches
+from util.patch_to_midi import patches_to_music, save_music
+from util.progression_input import (
     build_backing_skeleton_music,
     get_progression,
 )
-from program_utils import (
+from util.program_utils import (
     GUITAR_OVERDRIVE_PROGRAM,
     remap_tonal_program,
 )
@@ -166,8 +166,12 @@ def generate_lead(
     identity: bool = False,
     onset_th: float = 0.3,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
+    apply_tech: bool = True,
+    tech_checkpoint: Path | None = None,
+    tech_seed: int | None = None,
+    tech_none_bias: float = 0.0,
 ) -> Path:
-    """進行からリード MIDI を生成して保存する。"""
+    """進行からリード MIDI を生成して保存する（既定で奏法付与）。"""
     spec = get_progression(progression)
     chords = resolve_progression_chords(spec, key)
     chord_label = "-".join(
@@ -202,6 +206,18 @@ def generate_lead(
         blocked_power_onsets=blocked_power_onsets,
     )
     save_music(music, output_path)
+    if apply_tech:
+        from guitar_tech.apply_midi import apply_techniques_overwrite
+
+        apply_techniques_overwrite(
+            output_path,
+            checkpoint=tech_checkpoint,
+            seed=tech_seed,
+            none_bias=tech_none_bias,
+            role="lead",
+            instrument_name="Lead",
+        )
+        print(f"奏法付与: {output_path}（素は {output_path.stem}_bare.mid）")
 
     note_count = sum(len(t.notes) for t in music.tracks)
     print(f"進行: {progression} ({spec.family}, mode={spec.mode})")
@@ -246,6 +262,23 @@ def main() -> None:
     parser.add_argument("--no-skeleton", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--guitar-program", type=int, default=GUITAR_OVERDRIVE_PROGRAM)
     parser.add_argument("--onset-th", type=float, default=0.3, help="発音とみなすしきい値")
+    parser.add_argument(
+        "--no-apply-tech",
+        action="store_true",
+        help="奏法付与をスキップ（既定は常時付与）",
+    )
+    parser.add_argument(
+        "--tech-checkpoint",
+        type=Path,
+        default=None,
+        help="奏法付与 ckpt（省略時: checkpoints/guitar_tech/guitar_tech_apply_last.pt）",
+    )
+    parser.add_argument(
+        "--tech-none-bias",
+        type=float,
+        default=0.0,
+        help="奏法付与: none logit バイアス（大きいほど控えめ）",
+    )
     args = parser.parse_args()
 
     params = resolve_structure_params(
@@ -271,6 +304,10 @@ def main() -> None:
         save_skeleton=False,
         guitar_program=args.guitar_program,
         onset_th=args.onset_th,
+        apply_tech=not args.no_apply_tech,
+        tech_checkpoint=args.tech_checkpoint,
+        tech_seed=args.seed,
+        tech_none_bias=args.tech_none_bias,
     )
 
 

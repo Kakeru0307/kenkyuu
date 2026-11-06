@@ -9,8 +9,8 @@ import muspy
 import numpy as np
 import torch
 
-from checkpoint_paths import resolve_part_checkpoint
-from midi_to_patch import (
+from util.checkpoint_paths import resolve_part_checkpoint
+from util.midi_to_patch import (
     MidiPatch,
     TICKS_PER_BAR,
     constrain_guitar_from_input_onsets,
@@ -21,11 +21,11 @@ from midi_to_patch import (
     normalize_pianoroll,
 )
 from model import CVAEUNet, FiLMCVAEUNet, build_cvae, build_unet
-from patch_to_midi import patches_to_music, save_music
-from skeleton import PAIR_MODES, make_input_tonal
-from density_cond import midi_tempo_bpm
+from util.patch_to_midi import patches_to_music, save_music
+from util.skeleton import PAIR_MODES, make_input_tonal
+from util.density_cond import midi_tempo_bpm
 from makeData.constants import BASS_PITCH_MAX, BASS_PITCH_MIN, BASS_PROGRAM
-from program_utils import (
+from util.program_utils import (
     GUITAR_OVERDRIVE_PROGRAM,
     GUITAR_PITCH_MAX,
     GUITAR_PITCH_MIN,
