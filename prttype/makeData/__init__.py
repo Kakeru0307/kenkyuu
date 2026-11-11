@@ -1,4 +1,4 @@
-"""合成ギター MIDI 生成（Stage 1 用テストデータ）。"""
+"""合成ギター MIDI 生成。"""
 
 from __future__ import annotations
 

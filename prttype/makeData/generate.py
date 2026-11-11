@@ -1,4 +1,4 @@
-"""合成テスト MIDI の一括生成 CLI。"""
+"""合成 MIDI の一括生成 CLI。"""
 
 from __future__ import annotations
 

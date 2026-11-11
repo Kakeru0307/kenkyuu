@@ -17,6 +17,7 @@ from inference import (
     MIDI_DIR,
     export_guitar_music,
     load_model,
+    model_in_channels,
     predict_patches,
 )
 from util.midi_to_patch import midi_to_patches
@@ -120,11 +121,7 @@ def generate_lead_music(
             if model is None or device is None:
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 model = load_model(checkpoint, device)
-            try:
-                in_channels = int(model.encoder.conv1.in_channels)  # type: ignore[attr-defined]
-            except Exception:
-                in_channels = 11
-            allow_power_chords = in_channels >= 13
+            allow_power_chords = model_in_channels(model) >= 13
             output_patches = predict_patches(
                 model,
                 patches,

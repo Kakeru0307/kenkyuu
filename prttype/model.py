@@ -324,7 +324,7 @@ class FiLMCVAEUNet(nn.Module):
                 ).view(-1, feat.shape[1], 1, 1)
                 features[feat_idx] = feat * g
 
-        decoder_output = self.decoder.decoder(features)
+        decoder_output = self.decoder.decoder(features)  # smp>=0.5: list 1本
         return self.decoder.segmentation_head(decoder_output)
 
     def forward(

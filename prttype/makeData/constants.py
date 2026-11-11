@@ -57,7 +57,7 @@ PATTERN_TYPES = (
     "scale_down",
 )
 
-# バッキングはストローク専用（arp/scale は 0。総量は SYNTHETIC_COUNT のまま）
+# ストロークのみ
 PATTERN_WEIGHTS: dict[str, float] = {
     "progression_strum": 1.0,
     "progression_arpeggio": 0.0,
@@ -84,7 +84,7 @@ STRUM_ARTICULATION_WEIGHTS: dict[str, float] = {
     "rests": 0.05,
 }
 
-# 1小節あたりの発音回数 N（実験: 8分刻み固定。他は変えない）
+# 8分刻み固定
 ATTACKS_PER_BAR_WEIGHTS: dict[int, float] = {
     8: 1.0,
 }
@@ -97,6 +97,7 @@ PLACEMENT_TYPES = (
     "sparse_random",
 )
 
+# even のみ
 PLACEMENT_WEIGHTS: dict[str, float] = {
     "even": 1.0,
     "front": 0.0,
@@ -105,8 +106,8 @@ PLACEMENT_WEIGHTS: dict[str, float] = {
     "sparse_random": 0.0,
 }
 
-# テスト: 2000（even固定で刻みを確認したら 15000 に戻す）
-DEFAULT_SYNTHETIC_COUNT = 2000
+# even 8分の現行定義で足りる件数（進行×キー×音価）
+DEFAULT_SYNTHETIC_COUNT = 4000
 
 BPM_RANGE = (60, 150)
 

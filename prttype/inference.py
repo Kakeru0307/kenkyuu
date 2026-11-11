@@ -98,6 +98,17 @@ def _infer_in_channels(state_dict: dict) -> int | None:
     return None
 
 
+def model_in_channels(model: torch.nn.Module, default: int = 11) -> int:
+    """CVAE は model.in_channels。素の smp.Unet は encoder.conv1。"""
+    n = getattr(model, "in_channels", None)
+    if isinstance(n, int):
+        return n
+    try:
+        return int(model.encoder.conv1.in_channels)  # type: ignore[attr-defined]
+    except Exception:
+        return default
+
+
 def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state = checkpoint["model_state_dict"]
@@ -266,10 +277,7 @@ def predict_patches(
                 output = model.sample(tensor, temperature=temperature)
             else:
                 if tensor.shape[1] == 11:
-                    try:
-                        in_ch = int(model.encoder.conv1.in_channels)  # type: ignore[attr-defined]
-                    except Exception:
-                        in_ch = 11
+                    in_ch = model_in_channels(model)
                     if in_ch >= 12:
                         tensor = _append_bpm_cond(tensor, bpm)
                     if in_ch >= 13:

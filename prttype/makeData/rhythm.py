@@ -18,7 +18,7 @@ def preferred_attacks_range(bpm: float) -> tuple[int, int]:
 
 
 def sample_attacks_for_bpm(bpm: float, rng: random.Random) -> int:
-    # 重みが1種だけなら BPM 帯に関わらずそれを使う（例: 8分固定実験）
+    # 重みが1種ならそれを使う（現行は 8 固定）
     if len(ATTACKS_PER_BAR_WEIGHTS) == 1:
         return int(next(iter(ATTACKS_PER_BAR_WEIGHTS)))
     lo, hi = preferred_attacks_range(float(bpm))
