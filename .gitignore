@@ -32,7 +32,6 @@ prttype/data/**
 !prttype/data/high_bpm_pairs/structure_pairs.jsonl
 !prttype/data/high_bpm_pairs/structure_pairs_highA.jsonl
 prttype/midi/
-prttype/output_*.mid
 *.npy
 
 # 旧 checkpoint（stash）
