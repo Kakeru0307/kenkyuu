@@ -25,9 +25,9 @@ from generate_lead import generate_lead_music
 from inference import MIDI_DIR, load_model
 from makeData.constants import TICKS_PER_BAR
 from makeData.progressions import PROGRESSION_BY_NAME
-from midi_music_utils import power_chord_attack_times
-from patch_to_midi import save_music
-from program_utils import GUITAR_OVERDRIVE_PROGRAM
+from util.midi_music_utils import power_chord_attack_times
+from util.patch_to_midi import save_music
+from util.program_utils import GUITAR_OVERDRIVE_PROGRAM
 from sample_structure_params import resolve_structure_params
 from song_form import SongForm, sample_song_form
 
@@ -253,6 +253,7 @@ def generate_form(
                 guitar_program=guitar_program,
                 onset_th=float(decode["lead_onset_th"]),
                 blocked_power_onsets=blocked,
+                section_role=section.role,
                 model=lead_model,
                 device=device,
             )

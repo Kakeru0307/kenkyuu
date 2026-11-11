@@ -127,7 +127,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
 
 def _append_bpm_cond(tensor: torch.Tensor, bpm: float) -> torch.Tensor:
     """(B,11,H,W) → (B,12,H,W)。"""
-    from density_cond import bpm_to_unit
+    from util.density_cond import bpm_to_unit
 
     b, _, h, w = tensor.shape
     unit = float(bpm_to_unit(bpm))
@@ -137,12 +137,33 @@ def _append_bpm_cond(tensor: torch.Tensor, bpm: float) -> torch.Tensor:
 
 def _append_beat_cond(tensor: torch.Tensor, beat_type: str) -> torch.Tensor:
     """(B,12,H,W) → (B,24,H,W)。beat_type one-hot 定数マップを連結。"""
-    from dataset_drum import make_beat_onehot_map
-    from makeData.drum import beat_type_to_id
+    from makeData.drum import beat_type_to_id, make_beat_onehot_map
 
     b, _, h, w = tensor.shape
     beat_id = beat_type_to_id(beat_type)
     onehot = make_beat_onehot_map(beat_id, height=h, width=w)
+    cond = torch.from_numpy(onehot).to(device=tensor.device, dtype=tensor.dtype)
+    cond = cond.unsqueeze(0).expand(b, -1, -1, -1)
+    return torch.cat([tensor, cond], dim=1)
+
+
+def _append_section_cond(
+    tensor: torch.Tensor,
+    section_role: str | None,
+) -> torch.Tensor:
+    """lead 13ch → 20ch。section one-hot 7ch。role 無しは全ゼロ。"""
+    from song_form import SECTION_ROLES, make_section_onehot_map, section_role_to_id
+
+    b, _, h, w = tensor.shape
+    n = len(SECTION_ROLES)
+    if section_role is None:
+        onehot = np.zeros((n, h, w), dtype=np.float32)
+    else:
+        onehot = make_section_onehot_map(
+            section_role_to_id(section_role),
+            height=h,
+            width=w,
+        )
     cond = torch.from_numpy(onehot).to(device=tensor.device, dtype=tensor.dtype)
     cond = cond.unsqueeze(0).expand(b, -1, -1, -1)
     return torch.cat([tensor, cond], dim=1)
@@ -212,6 +233,7 @@ def predict_patches(
     peak_min_distance: int = 2,
     release_gap_ticks: int = 1,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
+    section_role: str | None = None,
 ) -> list[MidiPatch]:
     if guitar_only and bass_only:
         raise ValueError("guitar_only と bass_only は同時に True にできません")
@@ -239,6 +261,8 @@ def predict_patches(
                         blocked_power_onsets,
                         patch_bar_index=patch.bar_index,
                     )
+                if model.in_channels >= 20:
+                    tensor = _append_section_cond(tensor, section_role)
                 output = model.sample(tensor, temperature=temperature)
             else:
                 if tensor.shape[1] == 11:

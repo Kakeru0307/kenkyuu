@@ -89,6 +89,7 @@ def generate_lead_music(
     identity: bool = False,
     onset_th: float = 0.3,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
+    section_role: str | None = None,
     model=None,
     device=None,
 ) -> muspy.Music:
@@ -134,6 +135,7 @@ def generate_lead_music(
                 bpm=float(bpm),
                 chord_peak_decode=not allow_power_chords,
                 blocked_power_onsets=blocked_power_onsets,
+                section_role=section_role,
             )
 
     music = patches_to_music(output_patches)
