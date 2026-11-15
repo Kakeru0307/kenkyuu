@@ -131,32 +131,31 @@ def _write_form_manifest(
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _apply_lead_section_techs(
+def _apply_lead_note_techs(
     midi_path: Path,
-    section_spans: list[tuple[int, int, str]],
     *,
     seed: int | None,
 ) -> None:
-    """保存済み MIDI の Lead トラックへ、区間ごとの奏法を pitch bend として書く。"""
-    import pretty_midi
-
-    from guitar_tech.apply_midi import apply_section_techs_to_track
-
-    midi = pretty_midi.PrettyMIDI(str(midi_path))
-    spans = [
-        (
-            float(midi.tick_to_time(start)),
-            float(midi.tick_to_time(end)),
-            tech,
-        )
-        for start, end, tech in section_spans
-    ]
-    apply_section_techs_to_track(
-        midi_path,
-        spans,
-        track_name="Lead",
-        seed=seed,
+    """Lead にノート単位奏法付与し、曲全体のトラック velocity バランスを適用。"""
+    from guitar_tech.apply_midi import (
+        apply_techniques_to_midi,
+        balance_track_velocities,
     )
+
+    ckpt = Path("checkpoints/guitar_tech/guitar_tech_apply_last.pt")
+    if not ckpt.is_file():
+        return
+    apply_techniques_to_midi(
+        midi_path,
+        checkpoint=ckpt,
+        out_path=midi_path,
+        seed=seed,
+        none_bias=2.0,  # 学習の class-balance 補正。normal 寄りにしてうるささを抑える
+        top_voice=True,
+        role="lead",
+        instrument_name="Lead",
+    )
+    balance_track_velocities(midi_path, out_path=midi_path)
 
 
 def generate_form(
@@ -252,6 +251,8 @@ def generate_form(
                 checkpoint=lead_checkpoint,
                 guitar_program=guitar_program,
                 onset_th=float(decode["lead_onset_th"]),
+                sustain_th=float(decode.get("lead_sustain_th", 0.72)),
+                seed=seed,
                 blocked_power_onsets=blocked,
                 section_role=section.role,
                 model=lead_model,
@@ -284,6 +285,7 @@ def generate_form(
             bars_per_chord=bars_per_chord,
             checkpoint=bass_ckpt,
             onset_th=float(decode["bass_onset_th"]),
+            energy=section.energy,
             kick_times=kick_times,
             model=bass_model,
             device=device,
@@ -318,7 +320,8 @@ def generate_form(
 
     music.tempos = [muspy.Tempo(time=0, qpm=float(bpm))]
     save_music(music, output_path)
-    _apply_lead_section_techs(output_path, section_spans, seed=seed)
+    del section_spans  # 区間一色は使わない（ノート単位 Apply）
+    _apply_lead_note_techs(output_path, seed=seed)
 
     manifest_path = output_path.with_suffix(".json")
     _write_form_manifest(

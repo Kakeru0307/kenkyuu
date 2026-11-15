@@ -60,15 +60,15 @@ ROLE_ENERGY: dict[SectionRole, EnergyLevel] = {
     "outro": "low",
 }
 
-# role → リード奏法。guitar_tech.params.TECH_NAMES の名前を使う。
+# role → メタ用候補（本線の付与はノート単位 Apply。区間一色には使わない）
 ROLE_TECHNIQUE_CANDIDATES: dict[SectionRole, list[tuple[str, float]]] = {
-    "intro": [("none", 0.60), ("vibrato", 0.30), ("slide", 0.10)],
-    "verse": [("none", 0.50), ("hammer", 0.25), ("vibrato", 0.15), ("slide", 0.10)],
-    "pre_chorus": [("none", 0.35), ("vibrato", 0.25), ("choke", 0.20), ("hammer", 0.20)],
-    "bridge": [("vibrato", 0.40), ("choke", 0.30), ("none", 0.20), ("slide", 0.10)],
-    "chorus": [("choke", 0.30), ("choke_strong", 0.30), ("vibrato", 0.20), ("none", 0.20)],
-    "inst": [("vibrato", 0.35), ("choke", 0.25), ("slide", 0.20), ("none", 0.20)],
-    "outro": [("none", 0.50), ("vibrato", 0.30), ("choke", 0.20)],
+    "intro": [("normal", 0.60), ("vibrato", 0.30), ("slide", 0.10)],
+    "verse": [("normal", 0.50), ("hammer", 0.25), ("vibrato", 0.15), ("slide", 0.10)],
+    "pre_chorus": [("normal", 0.35), ("vibrato", 0.25), ("bend", 0.20), ("hammer", 0.20)],
+    "bridge": [("vibrato", 0.40), ("bend", 0.30), ("normal", 0.20), ("slide", 0.10)],
+    "chorus": [("bend", 0.30), ("choke_strong", 0.30), ("vibrato", 0.20), ("normal", 0.20)],
+    "inst": [("vibrato", 0.35), ("bend", 0.25), ("slide", 0.20), ("normal", 0.20)],
+    "outro": [("normal", 0.50), ("vibrato", 0.30), ("bend", 0.20)],
 }
 
 ROLE_BEAT_CANDIDATES: dict[SectionRole, list[tuple[str, float]]] = {
@@ -115,23 +115,26 @@ ENERGY_DECODE_PARAMS: dict[EnergyLevel, dict[str, float | int]] = {
         "peak_min_distance": 3,
         "release_gap_ticks": 2,
         "lead_onset_th": 0.40,
-        "bass_onset_th": 0.35,
+        "lead_sustain_th": 0.75,
+        "bass_onset_th": 0.42,
         "drum_onset_th": 0.40,
     },
     "mid": {
         "onset_th": 0.30,
         "peak_min_distance": 2,
         "release_gap_ticks": 1,
-        "lead_onset_th": 0.30,
-        "bass_onset_th": 0.30,
+        "lead_onset_th": 0.36,
+        "lead_sustain_th": 0.72,
+        "bass_onset_th": 0.38,
         "drum_onset_th": 0.35,
     },
     "high": {
         "onset_th": 0.22,
         "peak_min_distance": 2,
         "release_gap_ticks": 1,
-        "lead_onset_th": 0.22,
-        "bass_onset_th": 0.25,
+        "lead_onset_th": 0.30,
+        "lead_sustain_th": 0.68,
+        "bass_onset_th": 0.34,
         "drum_onset_th": 0.30,
     },
 }

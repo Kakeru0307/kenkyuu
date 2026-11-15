@@ -12,7 +12,8 @@ import pretty_midi as pm
 from .carriers import NoteEvent
 from .constants import PB_MAX, PB_TECHS
 from .features import note_has_overlap
-from .params import TECH_WEIGHTS, sample_params
+from .eligibility import apply_eligibility, filter_tech_for_note
+from .params import TECH_WEIGHTS, canonicalize_tech, sample_params
 
 # semitone → pitch bend (assuming ±2 semitone PB range → ±8192)
 _PB_PER_SEMITONE = PB_MAX / 2.0
@@ -37,6 +38,34 @@ def _reset_pb(inst: pm.Instrument, t: float) -> None:
     inst.pitch_bends.append(pm.PitchBend(pitch=0, time=float(t)))
 
 
+_MIN_NOTE_SEC = 0.005
+
+
+def _append_note(
+    inst: pm.Instrument,
+    *,
+    velocity: int,
+    pitch: int,
+    start: float,
+    end: float,
+) -> None:
+    """PrettyMIDI は end > start 必須。短すぎ／逆転はスキップまたは最小長に伸ばす。"""
+    s = float(start)
+    e = float(end)
+    if e <= s:
+        e = s + _MIN_NOTE_SEC
+    if e <= s:
+        return
+    inst.notes.append(
+        pm.Note(
+            velocity=int(max(1, min(127, velocity))),
+            pitch=int(max(0, min(127, pitch))),
+            start=s,
+            end=e,
+        )
+    )
+
+
 def copy_timing(src: pm.PrettyMIDI, dst: pm.PrettyMIDI) -> None:
     """Copy tempo map / time signatures so DAW beat grid matches the source.
 
@@ -50,35 +79,25 @@ def copy_timing(src: pm.PrettyMIDI, dst: pm.PrettyMIDI) -> None:
 
 
 def assign_techs(notes: list[NoteEvent], rng: random.Random) -> list[NoteLabel]:
+    """Synthetic fill only — keep sparse (≈70% normal)."""
     labels: list[NoteLabel] = []
     names = list(TECH_WEIGHTS.keys())
     weights = [TECH_WEIGHTS[n] for n in names]
     for i, n in enumerate(notes):
-        # target ~50-70% none overall
-        if rng.random() < 0.58:
-            labels.append(NoteLabel(i, "none", {}))
+        if rng.random() < 0.70:
+            labels.append(NoteLabel(i, "normal", {"vel_scale": 1.0}))
             continue
         tech = rng.choices(names, weights=weights, k=1)[0]
-        # eligibility soft filters
-        if tech == "vibrato" and n.duration < 0.28:
-            tech = "staccato" if n.duration < 0.15 else "none"
-        if tech == "tremolo" and n.duration < 0.25:
-            tech = "staccato"
-        # slide notes-mode needs a following note; hammer/pull are self-contained
-        if tech == "slide" and i + 1 >= len(notes):
-            tech = "none"
-        if tech == "palm_mute" and n.pitch > 64 and rng.random() < 0.5:
-            tech = "none"
-        params = sample_params(tech, rng) if tech != "none" else {}
-        # slide notes mode without next → fall back to pb
+        if tech == "mute" and n.pitch > 64 and rng.random() < 0.5:
+            tech = "normal"
+        params = sample_params(tech, rng) if tech != "normal" else {"vel_scale": 1.0}
         if tech == "slide" and params.get("mode") == "notes" and i + 1 >= len(notes):
             params["mode"] = "pb"
-        uses_pb = tech in PB_TECHS and not (
-            tech == "slide" and params.get("mode") == "notes"
-        )
-        if uses_pb and note_has_overlap(notes, i):
-            tech, params = "none", {}
+        tech = filter_tech_for_note(tech, notes, i, params=params)
+        if tech == "normal":
+            params = {"vel_scale": float(params.get("vel_scale", 1.0))}
         labels.append(NoteLabel(i, tech, params))
+    apply_eligibility(labels, notes)
     return labels
 
 
@@ -105,87 +124,90 @@ def render_target(
     label_by_i = {lb.note_index: lb for lb in labels}
 
     for i, n in enumerate(notes):
-        lb = label_by_i.get(i) or NoteLabel(i, "none", {})
-        tech, p = lb.tech, lb.params
-        # PB is channel-global; never bend under overlapping notes
+        lb = label_by_i.get(i) or NoteLabel(i, "normal", {"vel_scale": 1.0})
+        tech = canonicalize_tech(lb.tech)
+        # fill missing parametric keys; keep teacher vel_scale / pb_curve
+        p = sample_params(tech, rng)
+        p.update(lb.params or {})
         uses_pb = tech in PB_TECHS and not (
             tech == "slide" and p.get("mode") == "notes"
         )
         if uses_pb and note_has_overlap(notes, i):
-            tech, p = "none", {}
+            tech, p = "normal", {"vel_scale": float(p.get("vel_scale", 1.0))}
+
+        vel_scale = float(p.get("vel_scale", 1.0))
+        base_vel = int(max(1, min(127, round(n.velocity * vel_scale))))
+
+        if n.end <= n.start:
+            _append_note(
+                inst, velocity=base_vel, pitch=n.pitch, start=n.start, end=n.start + _MIN_NOTE_SEC
+            )
+            continue
 
         if tech == "tremolo":
             _render_tremolo(inst, n, p, rng)
             continue
-        if tech == "trill":
-            _render_trill(inst, n, p, rng)
-            continue
         if tech == "ghost":
             pitch = n.pitch - 12 if p.get("pitch_mode") == "drop12" else n.pitch
-            length = min(n.duration, p["len_ms"] / 1000.0)
-            inst.notes.append(
-                pm.Note(
-                    velocity=int(p["vel"]),
-                    pitch=int(max(0, min(127, pitch))),
-                    start=n.start,
-                    end=n.start + max(0.005, length),
-                )
+            length = min(n.duration, float(p.get("len_ms", 15.0)) / 1000.0)
+            vel = int(p["vel"]) if "vel" in p else max(1, min(55, base_vel))
+            _append_note(
+                inst,
+                velocity=vel,
+                pitch=pitch,
+                start=n.start,
+                end=n.start + max(_MIN_NOTE_SEC, length),
             )
             continue
-        if tech == "staccato":
-            length = n.duration * p["len_ratio"]
-            length = max(p["min_ms"] / 1000.0, min(p["max_ms"] / 1000.0, length))
-            vel = int(max(1, min(127, n.velocity * p["vel_scale"])))
-            inst.notes.append(
-                pm.Note(velocity=vel, pitch=n.pitch, start=n.start, end=n.start + length)
-            )
-            continue
-        if tech == "palm_mute":
-            bias = 1.0 - p["low_bias"] * max(0.0, (60 - n.pitch) / 24.0)
-            vel = int(max(1, min(127, n.velocity * p["vel_scale"] * bias)))
-            end = n.start + n.duration * p["len_ratio"]
-            inst.notes.append(
-                pm.Note(velocity=vel, pitch=n.pitch, start=n.start, end=max(n.start + 0.02, end))
+        if tech == "mute":
+            bias = 1.0 - float(p.get("low_bias", 0.0)) * max(0.0, (60 - n.pitch) / 24.0)
+            vel = int(max(1, min(127, n.velocity * float(p.get("vel_scale", 0.55)) * bias)))
+            end = n.start + n.duration * float(p.get("len_ratio", 0.65))
+            _append_note(
+                inst, velocity=vel, pitch=n.pitch, start=n.start, end=max(n.start + 0.02, end)
             )
             continue
         if tech == "hammer":
-            grace_end = n.start + p["grace_ms"] / 1000.0
+            # 短ノートで grace > 本体になると end<=start になるので clamp
+            grace_ms = min(float(p["grace_ms"]), max(1.0, n.duration * 1000.0 * 0.45))
+            grace_end = n.start + grace_ms / 1000.0
             grace_pitch = int(max(0, min(127, n.pitch - int(p["interval"]))))
-            inst.notes.append(
-                pm.Note(
-                    velocity=int(n.velocity * p["grace_vel_scale"]),
-                    pitch=grace_pitch,
-                    start=n.start,
-                    end=grace_end,
-                )
+            _append_note(
+                inst,
+                velocity=int(n.velocity * p["grace_vel_scale"]),
+                pitch=grace_pitch,
+                start=n.start,
+                end=min(grace_end, n.end),
             )
-            inst.notes.append(
-                pm.Note(
-                    velocity=n.velocity,
-                    pitch=n.pitch,
-                    start=max(n.start, grace_end - p["overlap_ms"] / 1000.0),
-                    end=n.end,
-                )
+            main_start = max(n.start, grace_end - float(p["overlap_ms"]) / 1000.0)
+            main_start = min(main_start, n.end - _MIN_NOTE_SEC)
+            _append_note(
+                inst,
+                velocity=n.velocity,
+                pitch=n.pitch,
+                start=main_start,
+                end=n.end,
             )
             continue
         if tech == "pull":
             high = int(max(0, min(127, n.pitch + int(round(p["from_semitone"])))))
-            mid = n.start + p["from_ms"] / 1000.0
-            inst.notes.append(
-                pm.Note(
-                    velocity=int(n.velocity * p["from_vel_scale"]),
-                    pitch=high,
-                    start=n.start,
-                    end=min(mid, n.end),
-                )
+            from_ms = min(float(p["from_ms"]), max(1.0, n.duration * 1000.0 * 0.45))
+            mid = n.start + from_ms / 1000.0
+            mid = min(mid, n.end - _MIN_NOTE_SEC)
+            mid = max(mid, n.start + _MIN_NOTE_SEC)
+            _append_note(
+                inst,
+                velocity=int(n.velocity * p["from_vel_scale"]),
+                pitch=high,
+                start=n.start,
+                end=mid,
             )
-            inst.notes.append(
-                pm.Note(
-                    velocity=int(n.velocity * p["dest_vel_scale"]),
-                    pitch=n.pitch,
-                    start=min(mid, n.end - 0.01),
-                    end=n.end,
-                )
+            _append_note(
+                inst,
+                velocity=int(n.velocity * p["dest_vel_scale"]),
+                pitch=n.pitch,
+                start=mid,
+                end=n.end,
             )
             continue
         if tech == "tap":
@@ -194,21 +216,20 @@ def render_target(
                 t = n.start
                 for k in range(int(p["run_notes"])):
                     length = p["tap_len_ms"] / 1000.0
-                    inst.notes.append(
-                        pm.Note(
-                            velocity=vel,
-                            pitch=int(max(0, min(127, n.pitch + k))),
-                            start=t,
-                            end=min(n.end, t + length),
-                        )
+                    _append_note(
+                        inst,
+                        velocity=vel,
+                        pitch=n.pitch + k,
+                        start=t,
+                        end=min(n.end, t + length),
                     )
                     t += length
                     if t >= n.end:
                         break
             else:
-                length = min(n.duration, p["tap_len_ms"] / 1000.0)
-                inst.notes.append(
-                    pm.Note(velocity=vel, pitch=n.pitch, start=n.start, end=n.start + length)
+                length = max(_MIN_NOTE_SEC, min(n.duration, p["tap_len_ms"] / 1000.0))
+                _append_note(
+                    inst, velocity=vel, pitch=n.pitch, start=n.start, end=n.start + length
                 )
             continue
         if tech == "slide" and p.get("mode") == "notes" and i + 1 < len(notes):
@@ -216,24 +237,24 @@ def render_target(
             direction = 1 if nxt.pitch >= n.pitch else -1
             start_p = int(n.pitch - direction * int(round(p["from_semitone"])))
             start_p = max(0, min(127, start_p))
-            slide_end = min(n.end - 0.01, n.start + p["slide_ms"] / 1000.0)
-            slide_end = max(n.start + 0.01, slide_end)
-            inst.notes.append(
-                pm.Note(velocity=n.velocity, pitch=start_p, start=n.start, end=slide_end)
+            slide_end = min(n.end - _MIN_NOTE_SEC, n.start + p["slide_ms"] / 1000.0)
+            slide_end = max(n.start + _MIN_NOTE_SEC, slide_end)
+            _append_note(
+                inst, velocity=n.velocity, pitch=start_p, start=n.start, end=slide_end
             )
             if slide_end < n.end:
-                inst.notes.append(
-                    pm.Note(velocity=n.velocity, pitch=n.pitch, start=slide_end, end=n.end)
+                _append_note(
+                    inst, velocity=n.velocity, pitch=n.pitch, start=slide_end, end=n.end
                 )
             continue
 
-        # default: keep note, maybe add PB for bend-like techs
-        inst.notes.append(
-            pm.Note(velocity=n.velocity, pitch=n.pitch, start=n.start, end=n.end)
+        # default: keep note (with vel_scale), maybe add PB
+        _append_note(
+            inst, velocity=base_vel, pitch=n.pitch, start=n.start, end=n.end
         )
         if tech == "vibrato":
             _add_vibrato_pb(inst, n, p)
-        elif tech in ("choke", "choke_strong"):
+        elif tech in ("bend", "choke_strong"):
             _add_bend_up_pb(inst, n, p)
         elif tech == "prebend":
             _add_prebend_pb(inst, n, p)
@@ -242,7 +263,6 @@ def render_target(
         elif tech == "arming":
             _add_arming_pb(inst, n, p)
         elif tech == "slide":
-            # notes-mode without next (or mode=pb): pitch-bend slide
             _add_slide_pb(inst, n, p, notes[i + 1] if i + 1 < len(notes) else None)
 
     # Stable PB order for players that assume time-sorted events

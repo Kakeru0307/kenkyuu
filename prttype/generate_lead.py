@@ -88,13 +88,19 @@ def generate_lead_music(
     checkpoint: Path = DEFAULT_CHECKPOINT,
     guitar_program: int = GUITAR_OVERDRIVE_PROGRAM,
     identity: bool = False,
-    onset_th: float = 0.3,
+    onset_th: float = 0.38,
+    sustain_th: float = 0.72,
+    seed: int | None = None,
+    max_onsets_per_bar: int = 6,
+    max_note_duration_ticks: int = 8,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
     section_role: str | None = None,
     model=None,
     device=None,
 ) -> muspy.Music:
     """進行からリードを生成し、muspy.Music を返す（ファイル保存なし）。"""
+    from util.lead_phrase import cap_lead_note_durations, thin_lead_melody
+
     spec = get_progression(progression)
 
     skeleton = build_backing_skeleton_music(
@@ -121,6 +127,8 @@ def generate_lead_music(
             if model is None or device is None:
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 model = load_model(checkpoint, device)
+            # lead は chord_peak_decode しない（densify でノート壁・空区間が出るため）。
+            # power は後段 _shape_lead_voicings で処理。
             allow_power_chords = model_in_channels(model) >= 13
             output_patches = predict_patches(
                 model,
@@ -129,13 +137,16 @@ def generate_lead_music(
                 input_mode="downbeat_chord",
                 guitar_only=True,
                 onset_th=onset_th,
+                sustain_th=sustain_th,
+                seed=seed,
                 bpm=float(bpm),
-                chord_peak_decode=not allow_power_chords,
+                chord_peak_decode=False,
                 blocked_power_onsets=blocked_power_onsets,
                 section_role=section_role,
             )
 
-    music = patches_to_music(output_patches)
+    # 全onset塊は 4tick（四分相当）で切る。2tick だと連打になってメロディが潰れる。
+    music = patches_to_music(output_patches, onset_segment_ticks=4)
     music = export_guitar_music(
         remap_tonal_program(music, guitar_program),
         program=guitar_program,
@@ -146,6 +157,18 @@ def generate_lead_music(
         guitar_program,
         allow_power_chords=allow_power_chords,
         blocked_power_onsets=blocked_power_onsets,
+    )
+    music = thin_lead_melody(
+        music,
+        key=key,
+        mode=spec.mode,
+        progression=spec,
+        bars=bars,
+        bars_per_chord=bars_per_chord,
+        max_onsets_per_bar=max_onsets_per_bar,
+    )
+    music = cap_lead_note_durations(
+        music, max_duration_ticks=max_note_duration_ticks
     )
     music = _apply_tempo(music, bpm)
     return music
@@ -163,12 +186,16 @@ def generate_lead(
     save_skeleton: bool = False,
     guitar_program: int = GUITAR_OVERDRIVE_PROGRAM,
     identity: bool = False,
-    onset_th: float = 0.3,
+    onset_th: float = 0.38,
+    sustain_th: float = 0.72,
+    seed: int | None = None,
+    max_onsets_per_bar: int = 6,
+    max_note_duration_ticks: int = 8,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
     apply_tech: bool = True,
     tech_checkpoint: Path | None = None,
     tech_seed: int | None = None,
-    tech_none_bias: float = 0.0,
+    tech_none_bias: float = 2.0,
 ) -> Path:
     """進行からリード MIDI を生成して保存する（既定で奏法付与）。"""
     spec = get_progression(progression)
@@ -202,6 +229,10 @@ def generate_lead(
         guitar_program=guitar_program,
         identity=identity,
         onset_th=onset_th,
+        sustain_th=sustain_th,
+        seed=seed,
+        max_onsets_per_bar=max_onsets_per_bar,
+        max_note_duration_ticks=max_note_duration_ticks,
         blocked_power_onsets=blocked_power_onsets,
     )
     save_music(music, output_path)
@@ -260,7 +291,25 @@ def main() -> None:
     # 旧CLI互換。スケルトンは常に保存しない。
     parser.add_argument("--no-skeleton", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--guitar-program", type=int, default=GUITAR_OVERDRIVE_PROGRAM)
-    parser.add_argument("--onset-th", type=float, default=0.3, help="発音とみなすしきい値")
+    parser.add_argument("--onset-th", type=float, default=0.38, help="発音とみなすしきい値")
+    parser.add_argument(
+        "--sustain-th",
+        type=float,
+        default=0.72,
+        help="sustain とみなすしきい値（低いほど長音になり細切れ減）",
+    )
+    parser.add_argument(
+        "--max-onsets-per-bar",
+        type=int,
+        default=6,
+        help="小節あたりの最大 onset 数（超過は弱い音から削除）",
+    )
+    parser.add_argument(
+        "--max-note-duration-ticks",
+        type=int,
+        default=8,
+        help="ノート最大長（resolution=4 で 8=2分相当）",
+    )
     parser.add_argument(
         "--no-apply-tech",
         action="store_true",
@@ -303,6 +352,10 @@ def main() -> None:
         save_skeleton=False,
         guitar_program=args.guitar_program,
         onset_th=args.onset_th,
+        sustain_th=args.sustain_th,
+        seed=args.seed,
+        max_onsets_per_bar=args.max_onsets_per_bar,
+        max_note_duration_ticks=args.max_note_duration_ticks,
         apply_tech=not args.no_apply_tech,
         tech_checkpoint=args.tech_checkpoint,
         tech_seed=args.seed,

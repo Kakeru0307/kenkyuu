@@ -1,129 +1,97 @@
-"""Build apply-learning pairs: carrier × randomized technique teacher.
-
-Default scale: 1500 carriers × 3 applies ≈ 4500 pairs.
-"""
+"""Build apply dataset: EG-Solo + Guitar-TECHS + friend MIDI."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import random
 from collections import Counter
 from pathlib import Path
 
-from .carriers import generate_carrier, notes_to_midi
-from .constants import APPLY_DATASET_DIR, DEFAULT_PROGRAM
-from .params import TECH_NAMES
-from .render import assign_techs, labels_to_jsonable, render_target
+from .constants import (
+    APPLY_DATASET_DIR,
+    EGSOLO_ROOT,
+    GUITAR_TECHS_ROOT,
+    TECH_ROOT,
+)
+from .import_egsolo_tech import import_egsolo
+from .import_friend_guitar import import_friend_guitar
+from .import_guitar_techs import import_guitar_techs
 
 
 def build(
     *,
     out_dir: Path = APPLY_DATASET_DIR,
-    n_carriers: int = 1500,
-    applies_per_carrier: int = 3,
-    seed: int = 0,
+    skip_egsolo: bool = False,
+    skip_techs: bool = False,
+    skip_friend: bool = False,
 ) -> Path:
-    rng = random.Random(seed)
     out_dir = Path(out_dir)
-    carrier_dir = out_dir / "carrier"
-    target_dir = out_dir / "target"
-    labels_dir = out_dir / "labels"
-    for d in (carrier_dir, target_dir, labels_dir):
-        d.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summaries: dict[str, dict] = {}
 
-    manifest_path = out_dir / "manifest.jsonl"
-    tech_note_counts: Counter[str] = Counter()
-    n_notes_total = 0
+    if not skip_egsolo and (EGSOLO_ROOT / "tech_midi").is_dir():
+        try:
+            summaries["egsolo"] = import_egsolo(egsolo_root=EGSOLO_ROOT, out_dir=out_dir)
+            print("egsolo", summaries["egsolo"])
+        except Exception as exc:
+            print(f"egsolo import skipped: {exc}")
+    if not skip_techs and GUITAR_TECHS_ROOT.is_dir():
+        try:
+            summaries["guitar_techs"] = import_guitar_techs(
+                root=GUITAR_TECHS_ROOT, out_dir=out_dir, max_per_tech=30
+            )
+            print("techs", summaries["guitar_techs"])
+        except Exception as exc:
+            print(f"techs import skipped: {exc}")
+    if not skip_friend and TECH_ROOT.is_dir():
+        try:
+            summaries["friend"] = import_friend_guitar(root=TECH_ROOT, out_dir=out_dir)
+            print("friend", summaries["friend"])
+        except Exception as exc:
+            print(f"friend import skipped: {exc}")
+
+    total_notes = 0
+    tech_counts: Counter[str] = Counter()
     n_pairs = 0
-
-    with manifest_path.open("w", encoding="utf-8") as mf:
-        for c_i in range(n_carriers):
-            notes, _ = generate_carrier(rng, program=DEFAULT_PROGRAM)
-            carrier_midi = notes_to_midi(notes, program=DEFAULT_PROGRAM)
-            carrier_name = f"c{c_i:05d}.mid"
-            carrier_rel = f"carrier/{carrier_name}"
-            carrier_midi.write(str(carrier_dir / carrier_name))
-
-            for a_i in range(applies_per_carrier):
-                pair_id = f"{c_i:05d}_{a_i:02d}"
-                labels = assign_techs(notes, rng)
-                target = render_target(notes, labels, program=DEFAULT_PROGRAM, rng=rng)
-                target_rel = f"target/{pair_id}.mid"
-                labels_rel = f"labels/{pair_id}.json"
-                target.write(str(target_dir / f"{pair_id}.mid"))
-
-                for lb in labels:
-                    tech_note_counts[lb.tech] += 1
-                    n_notes_total += 1
-
-                label_payload = {
-                    "id": pair_id,
-                    "carrier_id": f"c{c_i:05d}",
-                    "notes": [
-                        {
-                            "pitch": n.pitch,
-                            "start": round(n.start, 5),
-                            "end": round(n.end, 5),
-                            "velocity": n.velocity,
-                        }
-                        for n in notes
-                    ],
-                    "labels": labels_to_jsonable(labels),
-                    "tech_names": list(TECH_NAMES),
-                }
-                (labels_dir / f"{pair_id}.json").write_text(
-                    json.dumps(label_payload, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-
-                row = {
-                    "id": pair_id,
-                    "carrier": carrier_rel,
-                    "target": target_rel,
-                    "labels": labels_rel,
-                    "n_notes": len(notes),
-                    "tech_counts": dict(Counter(lb.tech for lb in labels)),
-                }
-                mf.write(json.dumps(row, ensure_ascii=False) + "\n")
-                n_pairs += 1
-
-            if (c_i + 1) % 250 == 0:
-                print(f"carriers {c_i + 1}/{n_carriers} pairs={n_pairs}")
-
-    none_n = tech_note_counts.get("none", 0)
+    for s in summaries.values():
+        n_pairs += int(s.get("n_pairs", 0))
+        total_notes += int(s.get("n_note_labels", 0))
+        tech_counts.update(s.get("tech_note_counts") or {})
+    normal_n = tech_counts.get("normal", 0)
     summary = {
-        "n_carriers": n_carriers,
-        "applies_per_carrier": applies_per_carrier,
         "n_pairs": n_pairs,
-        "n_note_labels": n_notes_total,
-        "none_ratio": (none_n / n_notes_total) if n_notes_total else 0.0,
-        "tech_note_counts": dict(tech_note_counts),
-        "seed": seed,
-        "program": DEFAULT_PROGRAM,
+        "n_note_labels": total_notes,
+        "normal_ratio": (normal_n / total_notes) if total_notes else 0.0,
+        "tech_note_counts": dict(tech_counts),
+        "sources": summaries,
     }
     (out_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(
-        f"wrote {out_dir}: pairs={n_pairs} none_ratio={summary['none_ratio']:.2f} "
-        f"techs={len([k for k,v in tech_note_counts.items() if k!='none' and v>0])}"
+        f"wrote {out_dir}: pairs={n_pairs} normal_ratio={summary['normal_ratio']:.2f}"
     )
+    if n_pairs == 0:
+        raise RuntimeError(
+            f"{out_dir}: pairs=0（EG-Solo / Guitar-TECHS / 依頼ギターのいずれも取り込めなかった）"
+        )
     return out_dir
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build guitar tech apply dataset")
+    parser = argparse.ArgumentParser(
+        description="Build guitar tech apply dataset (EG-Solo + TECHS + friend only)"
+    )
     parser.add_argument("--out-dir", type=Path, default=APPLY_DATASET_DIR)
-    parser.add_argument("--n-carriers", type=int, default=1500)
-    parser.add_argument("--applies-per-carrier", type=int, default=3)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--skip-egsolo", action="store_true")
+    parser.add_argument("--skip-techs", action="store_true")
+    parser.add_argument("--skip-friend", action="store_true")
     args = parser.parse_args()
     build(
         out_dir=args.out_dir,
-        n_carriers=args.n_carriers,
-        applies_per_carrier=args.applies_per_carrier,
-        seed=args.seed,
+        skip_egsolo=args.skip_egsolo,
+        skip_techs=args.skip_techs,
+        skip_friend=args.skip_friend,
     )
 
 

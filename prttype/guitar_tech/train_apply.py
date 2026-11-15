@@ -1,4 +1,4 @@
-"""Train note→technique classifier on apply dataset labels."""
+"""Train note→technique classifier (+ vel_scale) on apply dataset labels."""
 
 from __future__ import annotations
 
@@ -15,15 +15,18 @@ from .apply_model import TechApplyNet
 from .carriers import NoteEvent
 from .constants import APPLY_DATASET_DIR, CHECKPOINT_DIR
 from .features import NOTE_FEATURE_DIM, note_features
-from .params import TECH_NAMES, TECH_TO_ID
+from .params import TECH_NAMES, TECH_TO_ID, canonicalize_tech
 
-_NONE_ID = TECH_TO_ID["none"]
+_NORMAL_ID = TECH_TO_ID["normal"]
 
 
-def load_xy(dataset_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+def load_xy(
+    dataset_dir: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     labels_dir = dataset_dir / "labels"
     xs: list[np.ndarray] = []
     ys: list[int] = []
+    vs: list[float] = []
     unknown = 0
     for path in sorted(labels_dir.glob("*.json")):
         blob = json.loads(path.read_text(encoding="utf-8"))
@@ -39,20 +42,27 @@ def load_xy(dataset_dir: Path) -> tuple[np.ndarray, np.ndarray]:
         feats = note_features(notes)
         for lb in blob["labels"]:
             idx = int(lb["note_index"])
-            tech = str(lb["tech"])
+            tech = canonicalize_tech(str(lb["tech"]))
             if idx < 0 or idx >= len(feats):
                 continue
             tid = TECH_TO_ID.get(tech)
             if tid is None:
                 unknown += 1
                 continue
+            params = lb.get("params") or {}
+            vel_scale = float(params.get("vel_scale", 1.0))
             xs.append(feats[idx])
             ys.append(tid)
+            vs.append(vel_scale)
     if unknown:
         print(f"skipped unknown tech labels: {unknown}")
     if not xs:
         raise RuntimeError(f"no labels in {labels_dir}")
-    return np.stack(xs, axis=0).astype(np.float32), np.asarray(ys, dtype=np.int64)
+    return (
+        np.stack(xs, axis=0).astype(np.float32),
+        np.asarray(ys, dtype=np.int64),
+        np.asarray(vs, dtype=np.float32),
+    )
 
 
 def main() -> None:
@@ -64,11 +74,12 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden", type=int, default=128)
     parser.add_argument("--val-ratio", type=float, default=0.1)
+    parser.add_argument("--vel-loss-weight", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    x, y = load_xy(args.dataset_dir)
+    x, y, v = load_xy(args.dataset_dir)
     print(f"notes={len(y)} techs={len(TECH_NAMES)}")
 
     rng = np.random.default_rng(args.seed)
@@ -83,10 +94,11 @@ def main() -> None:
 
     x_train = torch.from_numpy(x[train_idx])
     y_train = torch.from_numpy(y[train_idx])
+    v_train = torch.from_numpy(v[train_idx])
     x_val = torch.from_numpy(x[val_idx])
     y_val = torch.from_numpy(y[val_idx])
+    v_val = torch.from_numpy(v[val_idx])
 
-    # class-balance sampling (none is majority)
     counts = np.bincount(y[train_idx], minlength=len(TECH_NAMES)).astype(np.float64)
     counts = np.maximum(counts, 1.0)
     w = 1.0 / counts[y[train_idx]]
@@ -96,15 +108,16 @@ def main() -> None:
         replacement=True,
     )
     train_loader = DataLoader(
-        TensorDataset(x_train, y_train),
+        TensorDataset(x_train, y_train, v_train),
         batch_size=min(args.batch_size, len(train_idx)),
         sampler=sampler,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = TechApplyNet(len(TECH_NAMES), hidden=args.hidden).to(device)
+    model = TechApplyNet(len(TECH_NAMES), hidden=args.hidden, predict_vel=True).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
     ce = nn.CrossEntropyLoss()
+    l1 = nn.SmoothL1Loss()
 
     best = 0.0
     best_state = None
@@ -112,10 +125,10 @@ def main() -> None:
         model.train()
         total = 0.0
         n = 0
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            logits = model(xb)
-            loss = ce(logits, yb)
+        for xb, yb, vb in train_loader:
+            xb, yb, vb = xb.to(device), yb.to(device), vb.to(device)
+            logits, vel_pred = model(xb)
+            loss = ce(logits, yb) + args.vel_loss_weight * l1(vel_pred, vb)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -123,16 +136,16 @@ def main() -> None:
             n += xb.shape[0]
         model.eval()
         with torch.no_grad():
-            logits = model(x_val.to(device))
+            logits, vel_pred = model(x_val.to(device))
             pred = logits.argmax(-1).cpu()
             acc = float((pred == y_val).float().mean().item())
-            # non-none recall-ish
-            mask = y_val != _NONE_ID
+            mask = y_val != _NORMAL_ID
             acc_pos = (
                 float((pred[mask] == y_val[mask]).float().mean().item())
                 if mask.any()
                 else 0.0
             )
+            vel_mae = float((vel_pred.cpu() - v_val).abs().mean().item())
         train_loss = total / max(1, n)
         if acc_pos >= best:
             best = acc_pos
@@ -140,7 +153,8 @@ def main() -> None:
         if epoch == 1 or epoch % 5 == 0 or epoch == args.epochs:
             print(
                 f"epoch {epoch:03d} loss={train_loss:.4f} "
-                f"acc={acc:.3f} acc_nonzero={acc_pos:.3f} best_nz={best:.3f}"
+                f"acc={acc:.3f} acc_nonzero={acc_pos:.3f} "
+                f"vel_mae={vel_mae:.3f} best_nz={best:.3f}"
             )
 
     if best_state is not None:
@@ -157,6 +171,7 @@ def main() -> None:
                 "hidden": args.hidden,
                 "feature_dim": int(x.shape[1]),
                 "note_feature_dim": NOTE_FEATURE_DIM,
+                "predict_vel": True,
                 "n_train_notes": int(len(train_idx)),
                 "n_val_notes": int(len(val_idx)),
                 "best_acc_nonzero": best,

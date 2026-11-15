@@ -1,4 +1,7 @@
-"""ベースライン合成（コードルート中心・energy で密度変化）。"""
+"""ベースライン合成（コードルートのみ・energy で密度上限）。
+
+発音グリッドと音価はすべて 4tick（四分）。8分以下の教師は作らない。
+"""
 
 from __future__ import annotations
 
@@ -9,18 +12,24 @@ import muspy
 
 from .builder import add_note, build_music
 from .constants import (
-    BASS_PITCH_MAX,
-    BASS_PITCH_MIN,
     BASS_PROGRAM,
     BEAT_TICKS,
     DEFAULT_BARS,
     KEY_TO_SEMITONE,
-    SCALE_INTERVALS,
+    BASS_PITCH_MAX,
+    BASS_PITCH_MIN,
     TICKS_PER_BAR,
 )
 from .progressions import ProgressionSpec, resolve_progression_chords
 
 EnergyLevel = Literal["low", "mid", "high"]
+
+# 小節あたり onset 上限 / 小節内 onset tick（四分）
+BASS_DENSITY: dict[EnergyLevel, tuple[int, tuple[int, ...]]] = {
+    "low": (1, (0,)),
+    "mid": (2, (0, 2 * BEAT_TICKS)),
+    "high": (4, (0, BEAT_TICKS, 2 * BEAT_TICKS, 3 * BEAT_TICKS)),
+}
 
 
 def make_bass_track(name: str = "Bass") -> muspy.Track:
@@ -38,30 +47,8 @@ def root_in_bass_range(root_key: str) -> int:
     return pitch
 
 
-def fifth_in_bass_range(root: int) -> int:
-    fifth = root + 7
-    if fifth > BASS_PITCH_MAX:
-        fifth = root - 5
-    if fifth < BASS_PITCH_MIN:
-        fifth = root + 7
-        while fifth > BASS_PITCH_MAX:
-            fifth -= 12
-    return fifth
-
-
-def _scale_pitch_classes(mode: str, tonic_key: str) -> list[int]:
-    tonic = KEY_TO_SEMITONE[tonic_key]
-    return [(tonic + iv) % 12 for iv in SCALE_INTERVALS[mode]]
-
-
-def _approach_pitch(target: int, rng: random.Random) -> int:
-    """次ルートへの半音アプローチ。"""
-    cand = target + rng.choice((-1, 1))
-    if cand < BASS_PITCH_MIN:
-        cand = target + 1
-    if cand > BASS_PITCH_MAX:
-        cand = target - 1
-    return cand
+def max_onsets_for_energy(energy: EnergyLevel) -> int:
+    return BASS_DENSITY[energy][0]
 
 
 def _chord_roots_for_bars(
@@ -87,6 +74,12 @@ def _velocity_for_energy(energy: EnergyLevel, rng: random.Random) -> int:
     return rng.randint(90, 110)
 
 
+def _bar_onset_count(track: muspy.Track, bar: int) -> int:
+    start = bar * TICKS_PER_BAR
+    end = start + TICKS_PER_BAR
+    return sum(1 for n in track.notes if start <= int(n.time) < end)
+
+
 def _add_kick_aligned_roots(
     track: muspy.Track,
     *,
@@ -96,19 +89,22 @@ def _add_kick_aligned_roots(
     energy: EnergyLevel,
     rng: random.Random,
 ) -> None:
-    """キック時刻付近にルートを置く（協調用の後処理強化）。"""
+    """キック時刻を四分に量子化し、小節上限内ならルートを足す。"""
     if not kick_times:
         return
+    max_onsets = max_onsets_for_energy(energy)
     vel = _velocity_for_energy(energy, rng)
     for t in sorted(kick_times):
-        bar = t // TICKS_PER_BAR
+        bar = int(t) // TICKS_PER_BAR
         if bar < 0 or bar >= bars:
             continue
-        # 既に同じ tick にノートがあればスキップ
-        if any(n.time == t for n in track.notes):
+        t4 = (int(t) // BEAT_TICKS) * BEAT_TICKS
+        if any(int(n.time) == t4 for n in track.notes):
+            continue
+        if _bar_onset_count(track, bar) >= max_onsets:
             continue
         root = root_in_bass_range(roots[bar])
-        add_note(track, time=t, pitch=root, duration=2, velocity=vel)
+        add_note(track, time=t4, pitch=root, duration=BEAT_TICKS, velocity=vel)
 
 
 def generate_bass_line(
@@ -124,81 +120,25 @@ def generate_bass_line(
     rng: random.Random | None = None,
     home_mode: str | None = None,
 ) -> muspy.Music:
-    """コードルート中心のベースラインを生成する。スケール音は home_mode（β1）。"""
-    from .progressions import performance_mode
-
+    """コードルートのみのベースライン。density は energy 表に固定。"""
+    del home_mode  # スケール経過は使わない
     rng = rng or random.Random(seed)
     track = make_bass_track()
     roots = _chord_roots_for_bars(spec, key, bars, bars_per_chord)
-    next_roots = roots[1:] + [roots[0]]
-    mode = performance_mode(spec, home_mode)
     vel = _velocity_for_energy(energy, rng)
+    _max, onsets = BASS_DENSITY[energy]
 
     for bar in range(bars):
         bar_t = bar * TICKS_PER_BAR
         root = root_in_bass_range(roots[bar])
-        fifth = fifth_in_bass_range(root)
-        next_root = root_in_bass_range(next_roots[bar])
-
-        if energy == "low":
-            # 全音符相当（小節頭のみ）
-            add_note(track, time=bar_t, pitch=root, duration=TICKS_PER_BAR - 1, velocity=vel)
-            continue
-
-        if energy == "mid":
-            # BPM 依存: 遅→2分、速→4分。root / fifth 交互
-            if bpm < 90:
-                onsets = (0, 2 * BEAT_TICKS)
-                durs = (2 * BEAT_TICKS - 1, 2 * BEAT_TICKS - 1)
-                pitches = (root, fifth)
-            else:
-                onsets = (0, BEAT_TICKS, 2 * BEAT_TICKS, 3 * BEAT_TICKS)
-                durs = (BEAT_TICKS - 1,) * 4
-                pitches = (root, root, fifth, fifth)
-            for onset, dur, pitch in zip(onsets, durs, pitches):
-                add_note(
-                    track,
-                    time=bar_t + onset,
-                    pitch=pitch,
-                    duration=dur,
-                    velocity=vel,
-                )
-            continue
-
-        # high: 8分駆動 or ウォーキング
-        if rng.random() < 0.45:
-            # walking: 4分 × 4、末拍は半音アプローチ
-            scale_pcs = _scale_pitch_classes(mode, key)
-            mid_pc = scale_pcs[rng.randint(0, len(scale_pcs) - 1)]
-            mid = mid_pc + (root // 12) * 12
-            while mid < BASS_PITCH_MIN:
-                mid += 12
-            while mid > BASS_PITCH_MAX:
-                mid -= 12
-            approach = _approach_pitch(next_root, rng)
-            pitches = (root, fifth, mid, approach)
-            for i, pitch in enumerate(pitches):
-                add_note(
-                    track,
-                    time=bar_t + i * BEAT_TICKS,
-                    pitch=pitch,
-                    duration=BEAT_TICKS - 1,
-                    velocity=vel,
-                )
-        else:
-            # driving 8ths: root-fifth-octave-fifth 繰り返し
-            octave = root + 12
-            if octave > BASS_PITCH_MAX:
-                octave = root
-            pattern = (root, fifth, octave, fifth)
-            for i in range(8):
-                add_note(
-                    track,
-                    time=bar_t + i * 2,
-                    pitch=pattern[i % 4],
-                    duration=1,
-                    velocity=vel,
-                )
+        for onset in onsets:
+            add_note(
+                track,
+                time=bar_t + onset,
+                pitch=root,
+                duration=BEAT_TICKS,
+                velocity=vel,
+            )
 
     _add_kick_aligned_roots(
         track,
