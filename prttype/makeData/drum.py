@@ -184,6 +184,25 @@ def beat_type_to_id(beat_type: str) -> int:
     return BEAT_TYPES.index(beat_type)
 
 
+def make_beat_onehot_map(
+    beat_id: int,
+    *,
+    height: int,
+    width: int,
+    n_types: int | None = None,
+):
+    """beat_type を (N,H,W) の one-hot 定数マップにする。"""
+    import numpy as np
+
+    n = len(BEAT_TYPES) if n_types is None else int(n_types)
+    out = np.zeros((n, height, width), dtype=np.float32)
+    idx = int(beat_id)
+    if not (0 <= idx < n):
+        raise ValueError(f"beat_id out of range: {beat_id}")
+    out[idx] = 1.0
+    return out
+
+
 def _hit(
     track: muspy.Track,
     *,

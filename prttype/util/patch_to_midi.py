@@ -28,12 +28,13 @@ def _extract_notes_from_channel(
     Active blobs with no sustain value (2) — i.e. all-onset blobs produced
     by a model that hasn't learned the onset/sustain distinction — are split
     into onset_segment_ticks-tick segments so continuous activation becomes
-    discrete strokes (e.g. 2 ticks = 8th note at resolution 4).
+    discrete strokes (e.g. 2 ticks = 8th, 4 ticks = quarter at resolution 4).
 
     Blobs that contain any sustain (2) use the classic 2→1 re-attack rule.
     """
     notes: list[muspy.Note] = []
     start_tick = bar_index * 16
+    seg = max(1, int(onset_segment_ticks))
 
     for pitch in range(128):
         row = channel[:, pitch]
@@ -78,7 +79,7 @@ def _extract_notes_from_channel(
                 # All-onset blob: split into onset_segment_ticks-tick strokes.
                 pos = blob_start
                 while pos < blob_end:
-                    chunk_end = min(pos + onset_segment_ticks, blob_end)
+                    chunk_end = min(pos + seg, blob_end)
                     notes.append(
                         muspy.Note(
                             time=start_tick + pos,
@@ -92,7 +93,12 @@ def _extract_notes_from_channel(
     return notes
 
 
-def tonal_chw_to_tracks(tonal_chw: np.ndarray, bar_index: int) -> list[muspy.Track]:
+def tonal_chw_to_tracks(
+    tonal_chw: np.ndarray,
+    bar_index: int,
+    *,
+    onset_segment_ticks: int = 2,
+) -> list[muspy.Track]:
     """(11, 128, 128) -> muspy tracks grouped by category."""
     if tonal_chw.ndim == 3 and tonal_chw.shape[0] == NUM_CATEGORIES:
         pianoroll = tonal_chw.transpose(1, 2, 0)
@@ -102,7 +108,9 @@ def tonal_chw_to_tracks(tonal_chw: np.ndarray, bar_index: int) -> list[muspy.Tra
     tracks: list[muspy.Track] = []
     for category in range(NUM_CATEGORIES):
         channel_notes = _extract_notes_from_channel(
-            pianoroll[:, :, category], bar_index
+            pianoroll[:, :, category],
+            bar_index,
+            onset_segment_ticks=onset_segment_ticks,
         )
         if not channel_notes:
             continue
@@ -117,13 +125,22 @@ def tonal_chw_to_tracks(tonal_chw: np.ndarray, bar_index: int) -> list[muspy.Tra
     return tracks
 
 
-def drum_chw_to_track(drum_chw: np.ndarray, bar_index: int) -> muspy.Track | None:
+def drum_chw_to_track(
+    drum_chw: np.ndarray,
+    bar_index: int,
+    *,
+    onset_segment_ticks: int = 2,
+) -> muspy.Track | None:
     if drum_chw.ndim == 3:
         channel = drum_chw[0]
     else:
         channel = drum_chw
 
-    notes = _extract_notes_from_channel(channel, bar_index)
+    notes = _extract_notes_from_channel(
+        channel,
+        bar_index,
+        onset_segment_ticks=onset_segment_ticks,
+    )
     if not notes:
         return None
 
@@ -136,6 +153,7 @@ def patches_to_music(
     patches: list[MidiPatch],
     *,
     from_normalized: bool = False,
+    onset_segment_ticks: int = 2,
 ) -> muspy.Music:
     track_map: dict[int, muspy.Track] = {}
     drum_track: muspy.Track | None = None
@@ -147,7 +165,11 @@ def patches_to_music(
             tonal = denormalize_pianoroll(tonal)
             drum = denormalize_pianoroll(drum)
 
-        for track in tonal_chw_to_tracks(tonal, patch.bar_index):
+        for track in tonal_chw_to_tracks(
+            tonal,
+            patch.bar_index,
+            onset_segment_ticks=onset_segment_ticks,
+        ):
             key = track.program
             if key not in track_map:
                 track_map[key] = muspy.Track(
@@ -155,7 +177,11 @@ def patches_to_music(
                 )
             track_map[key].extend(track)
 
-        drum_part = drum_chw_to_track(drum, patch.bar_index)
+        drum_part = drum_chw_to_track(
+            drum,
+            patch.bar_index,
+            onset_segment_ticks=onset_segment_ticks,
+        )
         if drum_part is not None:
             if drum_track is None:
                 drum_track = muspy.Track(program=0, is_drum=True, name="drums")

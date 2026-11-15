@@ -158,7 +158,7 @@ def generate_backing(
     apply_tech: bool = True,
     tech_checkpoint: Path | None = None,
     tech_seed: int | None = None,
-    tech_none_bias: float = 0.0,
+    tech_none_bias: float = 2.0,
 ) -> Path:
     """進行からバッキング MIDI を生成して保存する（既定で奏法付与）。"""
     spec = get_progression(progression)
