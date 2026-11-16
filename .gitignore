@@ -9,7 +9,7 @@ __pycache__/
 .pytest_cache/
 
 # Colab（別リポジトリで管理）— 条件エンコーダノートのみ本リポ追跡
-colab_train/**
+colab_train/*
 !colab_train/colab_condition_encoder.ipynb
 
 # データ・生成物（Colab 側で生成）
