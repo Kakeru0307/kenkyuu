@@ -8,9 +8,9 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
-# Colab（別リポジトリで管理）— 条件エンコーダノートのみ本リポ追跡
-colab_train/*
-!colab_train/colab_condition_encoder.ipynb
+# Colab（別リポジトリ https://github.com/Kakeru0307/colab_train ）
+# 条件エンコーダノートはそちらの feat/condition-encoder で追跡
+colab_train/
 
 # データ・生成物（Colab 側で生成）
 # data/ 直下は除外しつつ、accept.jsonl と prior 用 pairs JSONL だけ追跡する
