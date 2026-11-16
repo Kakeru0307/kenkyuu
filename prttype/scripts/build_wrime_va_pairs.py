@@ -95,8 +95,15 @@ def _text_from_row(row: dict) -> str:
 
 
 def load_wrime_csv(path: Path) -> list[dict]:
+    """CSV / TSV 両対応。"""
     with path.open(encoding="utf-8", newline="") as f:
-        return list(csv.DictReader(f))
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",\t")
+        except csv.Error:
+            dialect = csv.excel_tab if path.suffix.lower() == ".tsv" else csv.excel
+        return list(csv.DictReader(f, dialect=dialect))
 
 
 def build_from_hf(split: str = "train") -> list[dict]:
