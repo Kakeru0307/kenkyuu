@@ -1,13 +1,21 @@
 # V/A（Valence / Arousal）
 
-> 最終更新: 2026-11-09
+> 最終更新: 2026-11-16
 
 ## 役割
 
 テキストから得た感情を数値（V/A）に変換し、曲調層・構成層・注釈層に渡す。
 V（感情価）は -1〜+1（ネガティブ〜ポジティブ）、A（覚醒度）は -1〜+1（静か〜激しい）。
 
-現在の実装: `prttype/emotion_va.py` — XLM-RoBERTa-large（`gmendes9/multilingual_va_prediction`）
+現在の実装（本線）: `prttype/emotion_va.py` — XLM-RoBERTa-large（`gmendes9/multilingual_va_prediction`）
+
+### 条件エンコーダ（開発中・`feat/condition-encoder`）
+
+- `prttype/condition_encoder.py` — `analyze_condition(text) → {va, music_scores}`
+- 共有日本語 Transformer + `head_va` + `head_music`
+- 学習ノート: `colab_train/colab_condition_encoder.ipynb`（`colab_train.ipynb` には足さない）
+- 教師: THETA / WRIME / Warriner mood語 / Jamendo 実タグ。**自作VA文は使わない**
+- prior は当面 VA のみ（P-VA）。scores 投入は M3
 
 ## 現状の問題
 

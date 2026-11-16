@@ -8,8 +8,9 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
-# Colab（別リポジトリで管理）
-colab_train/
+# Colab（別リポジトリで管理）— 条件エンコーダノートのみ本リポ追跡
+colab_train/**
+!colab_train/colab_condition_encoder.ipynb
 
 # データ・生成物（Colab 側で生成）
 # data/ 直下は除外しつつ、accept.jsonl と prior 用 pairs JSONL だけ追跡する
@@ -31,6 +32,10 @@ prttype/data/**
 !prttype/data/high_bpm_pairs/
 !prttype/data/high_bpm_pairs/structure_pairs.jsonl
 !prttype/data/high_bpm_pairs/structure_pairs_highA.jsonl
+!prttype/data/music_condition/
+!prttype/data/music_condition/**
+!prttype/data/condition_encoder/
+!prttype/data/condition_encoder/README.md
 prttype/midi/
 *.npy
 
