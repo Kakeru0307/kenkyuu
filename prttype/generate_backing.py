@@ -71,11 +71,11 @@ def generate_backing_music(
     identity: bool = False,
     seed: int | None = None,
     temperature: float = 1.0,
-    chord_peak_decode: bool = True,
+    chord_peak_decode: bool = False,
     onset_th: float = 0.3,
     peak_min_distance: int = 2,
     release_gap_ticks: int = 1,
-    onset_segment_ticks: int = 2,
+    onset_segment_ticks: int = 0,
     model: Any | None = None,
     device: Any | None = None,
 ) -> muspy.Music:
@@ -152,11 +152,11 @@ def generate_backing(
     identity: bool = False,
     seed: int | None = None,
     temperature: float = 1.0,
-    chord_peak_decode: bool = True,
+    chord_peak_decode: bool = False,
     onset_th: float = 0.3,
     peak_min_distance: int = 2,
     release_gap_ticks: int = 1,
-    onset_segment_ticks: int = 2,
+    onset_segment_ticks: int = 0,
     model: Any | None = None,
     device: Any | None = None,
     apply_tech: bool = True,
@@ -270,15 +270,15 @@ def main() -> None:
         help="CVAE のサンプリング温度（CVAE checkpoint のみ）",
     )
     parser.add_argument(
-        "--no-chord-peak-decode",
+        "--chord-peak-decode",
         action="store_true",
-        help="コード共通ピークデコードをOFF（閾値量子化。分割は --onset-segment-ticks）",
+        help="コード共通ピークデコードをON（既定OFF）",
     )
     parser.add_argument(
         "--onset-segment-ticks",
         type=int,
-        default=2,
-        help="all-onset blob の分割幅。0以下で分割なし（2=8分相当）",
+        default=0,
+        help="all-onset blob の分割幅。既定0=分割なし（2=8分相当）",
     )
     parser.add_argument(
         "--no-apply-tech",
@@ -322,7 +322,7 @@ def main() -> None:
         guitar_program=args.guitar_program,
         seed=args.seed,
         temperature=args.temperature,
-        chord_peak_decode=not args.no_chord_peak_decode,
+        chord_peak_decode=args.chord_peak_decode,
         onset_segment_ticks=args.onset_segment_ticks,
         apply_tech=not args.no_apply_tech,
         tech_checkpoint=args.tech_checkpoint,

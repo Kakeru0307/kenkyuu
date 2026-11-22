@@ -176,8 +176,8 @@ def generate_form(
     guitar_program: int = GUITAR_OVERDRIVE_PROGRAM,
     seed: int | None = None,
     temperature: float = 1.0,
-    chord_peak_decode: bool = True,
-    onset_segment_ticks: int = 2,
+    chord_peak_decode: bool = False,
+    onset_segment_ticks: int = 0,
     with_lead: bool = True,
 ) -> Path:
     """構成テンプレに沿って 4 パートを連結し、1本の MIDI と form_manifest を保存する。"""
@@ -374,12 +374,16 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--guitar-program", type=int, default=GUITAR_OVERDRIVE_PROGRAM)
     parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--no-chord-peak-decode", action="store_true")
+    parser.add_argument(
+        "--chord-peak-decode",
+        action="store_true",
+        help="コード共通ピークデコードをON（既定OFF）",
+    )
     parser.add_argument(
         "--onset-segment-ticks",
         type=int,
-        default=2,
-        help="backing all-onset blob 分割幅。0以下で分割なし",
+        default=0,
+        help="backing all-onset blob 分割幅。既定0=分割なし",
     )
     parser.add_argument("--list-templates", action="store_true")
     args = parser.parse_args()
@@ -429,7 +433,7 @@ def main() -> None:
         guitar_program=args.guitar_program,
         seed=args.seed,
         temperature=args.temperature,
-        chord_peak_decode=not args.no_chord_peak_decode,
+        chord_peak_decode=args.chord_peak_decode,
         onset_segment_ticks=args.onset_segment_ticks,
         with_lead=not args.no_lead,
     )

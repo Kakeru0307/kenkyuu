@@ -21,7 +21,7 @@ DEFAULT_RESOLUTION = 4
 def _extract_notes_from_channel(
     channel: np.ndarray,
     bar_index: int,
-    onset_segment_ticks: int = 2,
+    onset_segment_ticks: int = 0,
 ) -> list[muspy.Note]:
     """channel: (128, 128) time x pitch with values 0/1/2.
 
@@ -109,7 +109,7 @@ def tonal_chw_to_tracks(
     tonal_chw: np.ndarray,
     bar_index: int,
     *,
-    onset_segment_ticks: int = 2,
+    onset_segment_ticks: int = 0,
 ) -> list[muspy.Track]:
     """(11, 128, 128) -> muspy tracks grouped by category."""
     if tonal_chw.ndim == 3 and tonal_chw.shape[0] == NUM_CATEGORIES:
@@ -141,7 +141,7 @@ def drum_chw_to_track(
     drum_chw: np.ndarray,
     bar_index: int,
     *,
-    onset_segment_ticks: int = 2,
+    onset_segment_ticks: int = 0,
 ) -> muspy.Track | None:
     if drum_chw.ndim == 3:
         channel = drum_chw[0]
@@ -165,7 +165,7 @@ def patches_to_music(
     patches: list[MidiPatch],
     *,
     from_normalized: bool = False,
-    onset_segment_ticks: int = 2,
+    onset_segment_ticks: int = 0,
 ) -> muspy.Music:
     track_map: dict[int, muspy.Track] = {}
     drum_track: muspy.Track | None = None

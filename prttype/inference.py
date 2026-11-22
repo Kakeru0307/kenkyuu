@@ -240,7 +240,7 @@ def predict_patches(
     seed: int | None = None,
     temperature: float = 1.0,
     bpm: float = 120.0,
-    chord_peak_decode: bool = True,
+    chord_peak_decode: bool = False,
     peak_min_distance: int = 2,
     release_gap_ticks: int = 1,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
