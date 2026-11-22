@@ -151,18 +151,24 @@ STROKE_GROOVES: dict[str, dict] = {
     },
 }
 
+# 条件 ch 学習向けに 7 型均等（相対重み。choices が正規化）
 STROKE_GROOVE_WEIGHTS: dict[str, float] = {
-    "eight_even": 0.35,
-    "four_down": 0.15,
-    "sixteen_busy": 0.12,
-    "backbeat_chop": 0.12,
-    "front_heavy": 0.08,
-    "sparse_pad": 0.08,
-    "rest_groove": 0.05,
+    "eight_even": 1.0,
+    "four_down": 1.0,
+    "sixteen_busy": 1.0,
+    "backbeat_chop": 1.0,
+    "front_heavy": 1.0,
+    "sparse_pad": 1.0,
+    "rest_groove": 1.0,
 }
 
-# even 8分の現行定義で足りる件数（進行×キー×音価）
-DEFAULT_SYNTHETIC_COUNT = 4000
+# 学習・推論 one-hot 順。7 stroke + arp（PATTERN の progression_arpeggio）
+STROKE_GROOVE_IDS: tuple[str, ...] = tuple(STROKE_GROOVES.keys())
+GROOVE_COND_TYPES: tuple[str, ...] = STROKE_GROOVE_IDS + ("arpeggio",)
+GROOVE_COND_CHANNELS: int = len(GROOVE_COND_TYPES)
+
+# groove 条件学習: 型あたり十分な strum 本数（8000×0.85/7 ≈ 970）
+DEFAULT_SYNTHETIC_COUNT = 8000
 
 # 合成乱択（prior は 40–240。速い側の教師欠落を埋める）
 BPM_RANGE = (60, 200)

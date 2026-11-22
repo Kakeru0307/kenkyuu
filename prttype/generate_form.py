@@ -1,8 +1,8 @@
 """構成レイヤ入口: 雰囲気文 → 曲の色 → インスト構成 → 4パート連結 → 1本の MIDI。
 
-区間ごとに進行・beat_type・奏法・bars を変え、バッキング／リード／ドラム／ベースを連結する。
+区間ごとに進行・beat_type・奏法・bars・編成レシピを変え、ON のパートだけ生成して連結する。
 リードの奏法は区間が決め、保存後にそのトラックへ pitch bend として書く。
-キー・BPM は曲通し固定。bass/drum は常時生成。
+キー・BPM は曲通し固定。編成 OFF のパートは生成スキップ。
 生成後に form_manifest.json を書き、form_gate_server で評価できる。
 """
 
@@ -25,11 +25,20 @@ from generate_lead import generate_lead_music
 from inference import MIDI_DIR, load_model
 from makeData.constants import TICKS_PER_BAR
 from makeData.progressions import PROGRESSION_BY_NAME
-from util.midi_music_utils import power_chord_attack_times
+from util.ensemble_lock import (
+    build_drum_grid,
+    collect_onsets,
+    shift_lead_to_gaps,
+    snap_music_to_grid,
+)
+from util.midi_music_utils import crop_music_to_bars, power_chord_attack_times
+
+# パッチ化下限。編成 span が短いときはこれで生成してから crop する。
+_GEN_MIN_BARS = 8
 from util.patch_to_midi import save_music
 from util.program_utils import GUITAR_OVERDRIVE_PROGRAM
 from sample_structure_params import resolve_structure_params
-from song_form import SongForm, sample_song_form
+from song_form import ArrSpan, SongForm, sample_song_form
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -121,8 +130,10 @@ def _write_form_manifest(
                 "progression": s.progression,
                 "bars": s.bars,
                 "beat_type": s.beat_type,
+                "stroke_groove": s.stroke_groove,
                 "technique_type": s.technique_type,
                 "energy": s.energy,
+                "arrangement_id": s.arrangement_id,
             }
             for s in form.sections
         ],
@@ -179,6 +190,7 @@ def generate_form(
     chord_peak_decode: bool = False,
     onset_segment_ticks: int = 0,
     with_lead: bool = True,
+    harmony_thin_level: int = 0,
 ) -> Path:
     """構成テンプレに沿って 4 パートを連結し、1本の MIDI と form_manifest を保存する。"""
     bass_ckpt = Path(bass_checkpoint)
@@ -193,6 +205,7 @@ def generate_form(
         seed=seed,
         home_progression=progression,
         home_mode=resolved_mode,
+        bpm=float(bpm),
     )
     MIDI_DIR.mkdir(parents=True, exist_ok=True)
     stem = (
@@ -212,95 +225,147 @@ def generate_form(
     music: muspy.Music | None = None
     bar_offset = 0
     section_notes: list[tuple[str, str, str, str, int, int, int, int, int]] = []
-    section_spans: list[tuple[int, int, str]] = []
+    has_lead_notes = False
 
     for i, section in enumerate(form.sections):
         section_seed = None if seed is None else int(seed) + i
         decode = section.decode_params
-        tick_offset = bar_offset * TICKS_PER_BAR
         prog = section.progression
-
-        part = generate_backing_music(
-            progression=prog,
-            key=key,
-            bars=section.bars,
-            bpm=bpm,
-            bars_per_chord=bars_per_chord,
-            checkpoint=checkpoint,
-            guitar_program=guitar_program,
-            seed=section_seed,
-            temperature=temperature,
-            chord_peak_decode=chord_peak_decode,
-            onset_th=float(decode["onset_th"]),
-            peak_min_distance=int(decode["peak_min_distance"]),
-            release_gap_ticks=int(decode["release_gap_ticks"]),
-            onset_segment_ticks=onset_segment_ticks,
-            model=backing_model,
-            device=device,
+        n_backing = n_lead = n_drum = n_bass = 0
+        spans: tuple[ArrSpan, ...] = section.spans or (
+            ArrSpan(bars=section.bars, parts=frozenset({"backing", "lead", "drum", "bass"})),
         )
-        n_backing = sum(len(t.notes) for t in part.tracks)
-        music = _shift_and_merge(music, part, tick_offset=tick_offset)
 
-        n_lead = 0
-        if with_lead and lead_model is not None:
-            blocked = power_chord_attack_times(part)
-            lead_part = generate_lead_music(
-                progression=prog,
-                key=key,
-                bars=section.bars,
-                bpm=bpm,
-                bars_per_chord=bars_per_chord,
-                checkpoint=lead_checkpoint,
-                guitar_program=guitar_program,
-                onset_th=float(decode["lead_onset_th"]),
-                sustain_th=float(decode.get("lead_sustain_th", 0.72)),
-                seed=seed,
-                blocked_power_onsets=blocked,
-                section_role=section.role,
-                model=lead_model,
-                device=device,
-            )
-            n_lead = sum(len(t.notes) for t in lead_part.tracks)
-            music = _shift_and_merge(music, lead_part, tick_offset=tick_offset)
+        for j, span in enumerate(spans):
+            span_seed = None if section_seed is None else int(section_seed) + j * 17
+            tick_offset = bar_offset * TICKS_PER_BAR
+            # パッチ化は 8 小節以上必須。短 span（lead_build の半区間など）は生成後に crop。
+            gen_bars = max(_GEN_MIN_BARS, int(span.bars))
+            # 噛み合わせ: drum → backing(グリッド) → bass(キック) → lead(隙間)
+            drum_part: muspy.Music | None = None
+            backing_part: muspy.Music | None = None
 
-        drum_part = generate_drum_music(
-            progression=prog,
-            key=key,
-            bars=section.bars,
-            bpm=bpm,
-            bars_per_chord=bars_per_chord,
-            checkpoint=drum_ckpt,
-            onset_th=float(decode["drum_onset_th"]),
-            beat_type=section.beat_type,
-            model=drum_model,
-            device=device,
-        )
-        n_drum = sum(len(t.notes) for t in drum_part.tracks)
-        music = _shift_and_merge(music, drum_part, tick_offset=tick_offset)
+            if span.has("drum"):
+                drum_part = generate_drum_music(
+                    progression=prog,
+                    key=key,
+                    bars=gen_bars,
+                    bpm=bpm,
+                    bars_per_chord=bars_per_chord,
+                    checkpoint=drum_ckpt,
+                    onset_th=float(decode["drum_onset_th"]),
+                    beat_type=section.beat_type,
+                    model=drum_model,
+                    device=device,
+                )
+                if gen_bars != span.bars:
+                    drum_part = crop_music_to_bars(drum_part, span.bars)
+                n_drum += sum(len(t.notes) for t in drum_part.tracks)
+                music = _shift_and_merge(music, drum_part, tick_offset=tick_offset)
 
-        kick_times = extract_kick_times(drum_part)
-        bass_part = generate_bass_music(
-            progression=prog,
-            key=key,
-            bars=section.bars,
-            bpm=bpm,
-            bars_per_chord=bars_per_chord,
-            checkpoint=bass_ckpt,
-            onset_th=float(decode["bass_onset_th"]),
-            energy=section.energy,
-            kick_times=kick_times,
-            model=bass_model,
-            device=device,
-        )
-        n_bass = sum(len(t.notes) for t in bass_part.tracks)
-        music = _shift_and_merge(music, bass_part, tick_offset=tick_offset)
+            grid = build_drum_grid(drum_part, bars=span.bars, subdiv_ticks=2)
+
+            if span.has("backing"):
+                backing_part = generate_backing_music(
+                    progression=prog,
+                    key=key,
+                    bars=gen_bars,
+                    bpm=bpm,
+                    bars_per_chord=bars_per_chord,
+                    checkpoint=checkpoint,
+                    guitar_program=guitar_program,
+                    seed=span_seed,
+                    temperature=temperature,
+                    chord_peak_decode=chord_peak_decode,
+                    onset_th=float(decode["onset_th"]),
+                    peak_min_distance=int(decode["peak_min_distance"]),
+                    release_gap_ticks=int(decode["release_gap_ticks"]),
+                    onset_segment_ticks=onset_segment_ticks,
+                    stroke_groove=section.stroke_groove,
+                    model=backing_model,
+                    device=device,
+                )
+                if gen_bars != span.bars:
+                    backing_part = crop_music_to_bars(backing_part, span.bars)
+                if grid:
+                    backing_part = snap_music_to_grid(
+                        backing_part, grid, max_shift=2, skip_drums=True
+                    )
+                n_backing += sum(len(t.notes) for t in backing_part.tracks)
+                music = _shift_and_merge(music, backing_part, tick_offset=tick_offset)
+
+            if span.has("bass"):
+                kick_times = extract_kick_times(drum_part) if drum_part is not None else None
+                bass_part = generate_bass_music(
+                    progression=prog,
+                    key=key,
+                    bars=gen_bars,
+                    bpm=bpm,
+                    bars_per_chord=bars_per_chord,
+                    checkpoint=bass_ckpt,
+                    onset_th=float(decode["bass_onset_th"]),
+                    energy=section.energy,
+                    kick_times=kick_times,
+                    model=bass_model,
+                    device=device,
+                )
+                if gen_bars != span.bars:
+                    bass_part = crop_music_to_bars(bass_part, span.bars)
+                if grid:
+                    bass_part = snap_music_to_grid(
+                        bass_part, grid, max_shift=2, skip_drums=True
+                    )
+                n_bass += sum(len(t.notes) for t in bass_part.tracks)
+                music = _shift_and_merge(music, bass_part, tick_offset=tick_offset)
+
+            if with_lead and lead_model is not None and span.has("lead"):
+                blocked_power = (
+                    power_chord_attack_times(backing_part)
+                    if backing_part is not None
+                    else frozenset()
+                )
+                lead_part = generate_lead_music(
+                    progression=prog,
+                    key=key,
+                    bars=gen_bars,
+                    bpm=bpm,
+                    bars_per_chord=bars_per_chord,
+                    checkpoint=lead_checkpoint,
+                    guitar_program=guitar_program,
+                    onset_th=float(decode["lead_onset_th"]),
+                    sustain_th=float(decode.get("lead_sustain_th", 0.72)),
+                    seed=seed,
+                    harmony_thin_level=harmony_thin_level,
+                    blocked_power_onsets=blocked_power,
+                    section_role=section.role,
+                    model=lead_model,
+                    device=device,
+                )
+                if gen_bars != span.bars:
+                    lead_part = crop_music_to_bars(lead_part, span.bars)
+                blocked_gaps = collect_onsets(backing_part, tonal_only=True)
+                blocked_gaps |= collect_onsets(drum_part, drums_only=True)
+                lead_part = shift_lead_to_gaps(
+                    lead_part,
+                    blocked_gaps,
+                    collide_window=0,
+                    search_radius=2,
+                    bars=span.bars,
+                )
+                n_here = sum(len(t.notes) for t in lead_part.tracks)
+                n_lead += n_here
+                if n_here > 0:
+                    has_lead_notes = True
+                music = _shift_and_merge(music, lead_part, tick_offset=tick_offset)
+
+            bar_offset += span.bars
 
         section_notes.append(
             (
                 section.label,
                 section.progression,
                 section.beat_type,
-                section.technique_type,
+                section.arrangement_id,
                 section.bars,
                 n_backing,
                 n_lead,
@@ -308,22 +373,18 @@ def generate_form(
                 n_bass,
             )
         )
-        section_spans.append(
-            (
-                tick_offset,
-                tick_offset + section.bars * TICKS_PER_BAR,
-                section.technique_type,
-            )
-        )
-        bar_offset += section.bars
 
     if music is None:
         raise RuntimeError("セクションが空です")
 
     music.tempos = [muspy.Tempo(time=0, qpm=float(bpm))]
     save_music(music, output_path)
-    del section_spans  # 区間一色は使わない（ノート単位 Apply）
-    _apply_lead_note_techs(output_path, seed=seed)
+    if has_lead_notes:
+        _apply_lead_note_techs(output_path, seed=seed)
+    else:
+        from guitar_tech.apply_midi import balance_track_velocities
+
+        balance_track_velocities(output_path, out_path=output_path)
 
     manifest_path = output_path.with_suffix(".json")
     _write_form_manifest(
@@ -340,9 +401,9 @@ def generate_form(
 
     total = sum(len(t.notes) for t in music.tracks)
     print(f"[form] {form.describe()}")
-    for label, prog, beat, tech, bars, n_b, n_l, n_d, n_ba in section_notes:
+    for label, prog, beat, arr, bars, n_b, n_l, n_d, n_ba in section_notes:
         print(
-            f"  {label}[{prog}|{beat}|{tech}|{bars}]: "
+            f"  {label}[{prog}|{beat}|{arr}|{bars}]: "
             f"backing={n_b} lead={n_l} drum={n_d} bass={n_ba} notes"
         )
     print(f"home進行: {progression} / キー: {key} / BPM: {bpm}")
@@ -384,6 +445,16 @@ def main() -> None:
         type=int,
         default=0,
         help="backing all-onset blob 分割幅。既定0=分割なし",
+    )
+    parser.add_argument(
+        "--harmony-thin-level",
+        type=int,
+        default=0,
+        choices=[0, 1, 2, 3, 4],
+        help=(
+            "リード進行外音: 0=現状 / 1=ハード落としなし / "
+            "2=減点弱め / 3=和声ほぼ無視 / 4=和声スコアなし"
+        ),
     )
     parser.add_argument("--list-templates", action="store_true")
     args = parser.parse_args()
@@ -436,6 +507,7 @@ def main() -> None:
         chord_peak_decode=args.chord_peak_decode,
         onset_segment_ticks=args.onset_segment_ticks,
         with_lead=not args.no_lead,
+        harmony_thin_level=args.harmony_thin_level,
     )
 
 

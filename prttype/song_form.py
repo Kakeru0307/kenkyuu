@@ -1,6 +1,6 @@
 """曲全体の並び（構成レイヤ）。短い条件 prior とは別物。
 
-v2: テンプレ抽選 + 区間ごとの進行（同 mode 対比）+ beat_type。
+v2: テンプレ抽選 + 区間ごとの進行（同 mode 対比）+ beat_type + 編成レシピ。
 区間 role は SongFormer 語彙に統一。
 """
 
@@ -20,6 +20,7 @@ from makeData.progressions import (
 )
 
 EnergyLevel = Literal["low", "mid", "high"]
+PartName = Literal["backing", "lead", "drum", "bass"]
 SectionRole = Literal[
     "intro",
     "verse",
@@ -29,6 +30,8 @@ SectionRole = Literal[
     "inst",
     "outro",
 ]
+
+ALL_PARTS: frozenset[PartName] = frozenset({"backing", "lead", "drum", "bass"})
 
 SECTION_ROLES: tuple[SectionRole, ...] = (
     "intro",
@@ -106,6 +109,43 @@ ROLE_BEAT_CANDIDATES: dict[SectionRole, list[tuple[str, float]]] = {
     "outro": [
         ("ballad_sparse", 0.70),
         ("eight_basic", 0.30),
+    ],
+}
+
+# role → 編成レシピ（区間マスク + 区間内ビルド）
+ROLE_ARRANGEMENT_CANDIDATES: dict[SectionRole, list[tuple[str, float]]] = {
+    "intro": [
+        ("lead_only", 0.22),
+        ("backing_only", 0.18),
+        ("bass_only", 0.12),
+        ("lead_build", 0.28),
+        ("full_sparse", 0.20),
+    ],
+    "verse": [
+        ("full", 0.70),
+        ("no_lead", 0.30),
+    ],
+    "pre_chorus": [
+        ("full", 0.60),
+        ("drop_bass", 0.40),
+    ],
+    "chorus": [
+        ("full", 1.0),
+    ],
+    "bridge": [
+        ("bass_break", 0.25),
+        ("lead_feature", 0.35),
+        ("full", 0.40),
+    ],
+    "inst": [
+        ("bass_break", 0.20),
+        ("lead_feature", 0.40),
+        ("full", 0.40),
+    ],
+    "outro": [
+        ("strip_down", 0.35),
+        ("lead_fade", 0.35),
+        ("full_sparse", 0.30),
     ],
 }
 
@@ -198,6 +238,17 @@ def map_songformer_label(label: str) -> SectionRole | None:
 
 
 @dataclass(frozen=True)
+class ArrSpan:
+    """区間内の連続サブ区間。bars 分だけ parts のパートを生成する。"""
+
+    bars: int
+    parts: frozenset[PartName]
+
+    def has(self, part: PartName) -> bool:
+        return part in self.parts
+
+
+@dataclass(frozen=True)
 class FormSection:
     role: SectionRole
     bars: int
@@ -206,6 +257,25 @@ class FormSection:
     technique_type: str
     progression: str
     label: str
+    arrangement_id: str = "full"
+    stroke_groove: str = "eight_even"
+    spans: tuple[ArrSpan, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.spans:
+            return
+        object.__setattr__(
+            self,
+            "spans",
+            (ArrSpan(bars=self.bars, parts=ALL_PARTS),),
+        )
+
+    @property
+    def parts_mask(self) -> frozenset[PartName]:
+        mask: set[PartName] = set()
+        for span in self.spans:
+            mask |= set(span.parts)
+        return frozenset(mask)
 
     @property
     def decode_params(self) -> dict[str, float | int]:
@@ -225,7 +295,7 @@ class SongForm:
 
     def describe(self) -> str:
         parts = " → ".join(
-            f"{s.label}[{s.progression}|{s.beat_type}|{s.technique_type}|{s.bars}]"
+            f"{s.label}[{s.progression}|{s.beat_type}|{s.stroke_groove}|{s.arrangement_id}|{s.bars}]"
             for s in self.sections
         )
         return (
@@ -276,6 +346,71 @@ def _pick_technique_type(role: SectionRole, rng: random.Random | None) -> str:
     return rng.choices(names, weights=weights, k=1)[0]
 
 
+def _pick_arrangement_id(role: SectionRole, rng: random.Random | None) -> str:
+    cands = ROLE_ARRANGEMENT_CANDIDATES[role]
+    if rng is None:
+        return cands[0][0]
+    names = [c[0] for c in cands]
+    weights = [c[1] for c in cands]
+    return rng.choices(names, weights=weights, k=1)[0]
+
+
+def _parts(*names: PartName) -> frozenset[PartName]:
+    return frozenset(names)
+
+
+def spans_for_arrangement(arrangement_id: str, total_bars: int) -> tuple[ArrSpan, ...]:
+    """レシピ ID から区間内 spans を作る。bars 合計は total_bars。"""
+    bars = max(1, int(total_bars))
+    half = max(1, bars // 2)
+    rest = max(1, bars - half)
+    # half+rest が bars を超えないよう調整（奇数 bars）
+    if half + rest > bars:
+        rest = bars - half
+    if rest < 1:
+        half = bars
+        rest = 0
+
+    def one(parts: frozenset[PartName]) -> tuple[ArrSpan, ...]:
+        return (ArrSpan(bars=bars, parts=parts),)
+
+    def two(
+        first_parts: frozenset[PartName],
+        second_parts: frozenset[PartName],
+    ) -> tuple[ArrSpan, ...]:
+        if rest < 1:
+            return (ArrSpan(bars=bars, parts=first_parts),)
+        return (
+            ArrSpan(bars=half, parts=first_parts),
+            ArrSpan(bars=rest, parts=second_parts),
+        )
+
+    if arrangement_id == "lead_only":
+        return one(_parts("lead"))
+    if arrangement_id == "backing_only":
+        return one(_parts("backing"))
+    if arrangement_id == "bass_only":
+        return one(_parts("bass"))
+    if arrangement_id == "lead_build":
+        return two(_parts("lead"), _parts("lead", "drum", "bass"))
+    if arrangement_id == "full_sparse":
+        return one(_parts("backing", "lead", "bass"))
+    if arrangement_id == "no_lead":
+        return one(_parts("backing", "drum", "bass"))
+    if arrangement_id == "drop_bass":
+        return one(_parts("backing", "lead", "drum"))
+    if arrangement_id == "bass_break":
+        return one(_parts("bass"))
+    if arrangement_id == "lead_feature":
+        return one(_parts("lead", "drum", "bass"))
+    if arrangement_id == "strip_down":
+        return two(ALL_PARTS, _parts("lead", "bass"))
+    if arrangement_id == "lead_fade":
+        return two(ALL_PARTS, _parts("lead"))
+    # full / unknown
+    return one(ALL_PARTS)
+
+
 def _bars_for_role(role: SectionRole) -> int:
     if role == "chorus":
         return CHORUS_BARS
@@ -305,6 +440,18 @@ def _pick_progression_for_role(
     return chosen
 
 
+def _pick_stroke_groove(
+    rng: random.Random | None,
+    *,
+    bpm: float | None = None,
+) -> str:
+    from makeData.patterns import choose_stroke_groove
+
+    if rng is None:
+        return "eight_even"
+    return choose_stroke_groove(rng, bpm=bpm)
+
+
 def _section(
     role: SectionRole,
     *,
@@ -313,10 +460,13 @@ def _section(
     home_mode: str,
     rng: random.Random,
     used_contrast: set[str],
+    bpm: float | None = None,
 ) -> FormSection:
+    bars = _bars_for_role(role)
+    arrangement_id = _pick_arrangement_id(role, rng)
     return FormSection(
         role=role,
-        bars=_bars_for_role(role),
+        bars=bars,
         energy=ROLE_ENERGY[role],
         beat_type=_pick_beat_type(role, rng),
         technique_type=_pick_technique_type(role, rng),
@@ -329,6 +479,9 @@ def _section(
             used_contrast=used_contrast,
         ),
         label=ROLE_LABEL_JA[role],
+        arrangement_id=arrangement_id,
+        stroke_groove=_pick_stroke_groove(rng, bpm=bpm),
+        spans=spans_for_arrangement(arrangement_id, bars),
     )
 
 
@@ -371,8 +524,9 @@ def sample_song_form(
     home_mode: str,
     seed: int | None = None,
     va: tuple[float, float] = (0.0, 0.0),
+    bpm: float | None = None,
 ) -> SongForm:
-    """重み付きでテンプレを1つ選ぶ。区間進行・beat_type もシード付き抽選。"""
+    """重み付きでテンプレを1つ選ぶ。区間進行・beat_type・stroke_groove も抽選。"""
     if not home_progression:
         raise ValueError("home_progression is required")
     if not home_mode:
@@ -402,6 +556,7 @@ def sample_song_form(
                     home_mode=home_mode,
                     rng=rng,
                     used_contrast=used_contrast,
+                    bpm=bpm,
                 )
             )
         return SongForm(

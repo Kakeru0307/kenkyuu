@@ -76,10 +76,15 @@ def generate_backing_music(
     peak_min_distance: int = 2,
     release_gap_ticks: int = 1,
     onset_segment_ticks: int = 0,
+    stroke_groove: str | None = None,
     model: Any | None = None,
     device: Any | None = None,
 ) -> muspy.Music:
     """進行からバッキングを生成し、muspy.Music を返す（ファイル保存なし）。"""
+    import random
+
+    from makeData.patterns import choose_stroke_groove
+
     spec = get_progression(progression)
 
     bpc = max(1, int(bars_per_chord))
@@ -92,6 +97,10 @@ def generate_backing_music(
         chords_per_bar=1,
         raise_odd_loop_last=False,
     )
+    groove = stroke_groove
+    if groove is None:
+        rng = random.Random(seed)
+        groove = choose_stroke_groove(rng, bpm=float(bpm))
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_midi = Path(tmp) / "skeleton.mid"
@@ -124,6 +133,7 @@ def generate_backing_music(
                 onset_th=onset_th,
                 peak_min_distance=peak_min_distance,
                 release_gap_ticks=release_gap_ticks,
+                stroke_groove=groove,
             )
 
     music = patches_to_music(
