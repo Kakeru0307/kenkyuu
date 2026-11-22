@@ -177,6 +177,7 @@ def generate_form(
     seed: int | None = None,
     temperature: float = 1.0,
     chord_peak_decode: bool = True,
+    onset_segment_ticks: int = 2,
     with_lead: bool = True,
 ) -> Path:
     """構成テンプレに沿って 4 パートを連結し、1本の MIDI と form_manifest を保存する。"""
@@ -233,6 +234,7 @@ def generate_form(
             onset_th=float(decode["onset_th"]),
             peak_min_distance=int(decode["peak_min_distance"]),
             release_gap_ticks=int(decode["release_gap_ticks"]),
+            onset_segment_ticks=onset_segment_ticks,
             model=backing_model,
             device=device,
         )
@@ -373,6 +375,12 @@ def main() -> None:
     parser.add_argument("--guitar-program", type=int, default=GUITAR_OVERDRIVE_PROGRAM)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--no-chord-peak-decode", action="store_true")
+    parser.add_argument(
+        "--onset-segment-ticks",
+        type=int,
+        default=2,
+        help="backing all-onset blob 分割幅。0以下で分割なし",
+    )
     parser.add_argument("--list-templates", action="store_true")
     args = parser.parse_args()
 
@@ -422,6 +430,7 @@ def main() -> None:
         seed=args.seed,
         temperature=args.temperature,
         chord_peak_decode=not args.no_chord_peak_decode,
+        onset_segment_ticks=args.onset_segment_ticks,
         with_lead=not args.no_lead,
     )
 

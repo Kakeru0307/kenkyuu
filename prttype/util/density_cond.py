@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from makeData.constants import BPM_RANGE
 from makeData.rhythm import preferred_attacks_range, sample_attacks_for_bpm
 
 TONAL_CHANNELS = 11
@@ -12,7 +11,8 @@ COND_CHANNELS = 1
 MODEL_IN_CHANNELS = TONAL_CHANNELS + COND_CHANNELS
 MODEL_OUT_CHANNELS = TONAL_CHANNELS
 
-BPM_MIN, BPM_MAX = float(BPM_RANGE[0]), float(BPM_RANGE[1])
+# structure_prior.BPM_LO/HI と一致（合成 BPM_RANGE の 60–200 とは独立）
+BPM_MIN, BPM_MAX = 40.0, 240.0
 
 __all__ = [
     "TONAL_CHANNELS",

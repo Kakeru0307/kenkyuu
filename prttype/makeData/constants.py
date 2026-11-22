@@ -57,10 +57,10 @@ PATTERN_TYPES = (
     "scale_down",
 )
 
-# ストロークのみ
+# strum 主軸 + arp 低比率（STROKE_GROOVE と併用）
 PATTERN_WEIGHTS: dict[str, float] = {
-    "progression_strum": 1.0,
-    "progression_arpeggio": 0.0,
+    "progression_strum": 0.85,
+    "progression_arpeggio": 0.15,
     "chord_strum": 0.0,
     "arpeggio": 0.0,
     "scale_up": 0.0,
@@ -76,6 +76,7 @@ STRUM_ARTICULATIONS = (
     "rests",
 )
 
+# フォールバック用（主経路は STROKE_GROOVE）
 STRUM_ARTICULATION_WEIGHTS: dict[str, float] = {
     "solid": 0.30,
     "staccato": 0.30,
@@ -84,9 +85,13 @@ STRUM_ARTICULATION_WEIGHTS: dict[str, float] = {
     "rests": 0.05,
 }
 
-# 8分刻み固定
+# フォールバック用。主経路は STROKE_GROOVE の attacks
 ATTACKS_PER_BAR_WEIGHTS: dict[int, float] = {
-    8: 1.0,
+    2: 0.05,
+    4: 0.25,
+    6: 0.15,
+    8: 0.35,
+    16: 0.20,
 }
 
 PLACEMENT_TYPES = (
@@ -97,27 +102,77 @@ PLACEMENT_TYPES = (
     "sparse_random",
 )
 
-# even のみ
+# フォールバック用。主経路は STROKE_GROOVE の placement
 PLACEMENT_WEIGHTS: dict[str, float] = {
-    "even": 1.0,
-    "front": 0.0,
-    "back": 0.0,
-    "offbeat": 0.0,
-    "sparse_random": 0.0,
+    "even": 0.40,
+    "front": 0.15,
+    "back": 0.15,
+    "offbeat": 0.15,
+    "sparse_random": 0.15,
+}
+
+# 1曲=1グルーヴ。attacks は int または重み dict。placement も同様可。
+STROKE_GROOVES: dict[str, dict] = {
+    "eight_even": {
+        "attacks": 8,
+        "placement": "even",
+        "articulation_weights": {"solid": 0.40, "staccato": 0.35, "mixed": 0.25},
+    },
+    "four_down": {
+        "attacks": 4,
+        "placement": "even",
+        "articulation_weights": {"solid": 1.0},
+    },
+    "sixteen_busy": {
+        "attacks": 16,
+        "placement": "even",
+        "articulation_weights": {"staccato": 0.55, "mixed": 0.45},
+        "min_bpm": 100,
+    },
+    "backbeat_chop": {
+        "attacks": {4: 0.50, 6: 0.25, 8: 0.25},
+        "placement": {"offbeat": 0.60, "back": 0.40},
+        "articulation_weights": {"staccato": 0.60, "rests": 0.40},
+    },
+    "front_heavy": {
+        "attacks": {4: 0.55, 5: 0.20, 6: 0.25},
+        "placement": "front",
+        "articulation_weights": {"solid": 1.0},
+    },
+    "sparse_pad": {
+        "attacks": {2: 0.45, 3: 0.30, 4: 0.25},
+        "placement": "sparse_random",
+        "articulation_weights": {"sustained": 1.0},
+    },
+    "rest_groove": {
+        "attacks": {6: 0.45, 8: 0.55},
+        "placement": "even",
+        "articulation_weights": {"rests": 1.0},
+    },
+}
+
+STROKE_GROOVE_WEIGHTS: dict[str, float] = {
+    "eight_even": 0.35,
+    "four_down": 0.15,
+    "sixteen_busy": 0.12,
+    "backbeat_chop": 0.12,
+    "front_heavy": 0.08,
+    "sparse_pad": 0.08,
+    "rest_groove": 0.05,
 }
 
 # even 8分の現行定義で足りる件数（進行×キー×音価）
 DEFAULT_SYNTHETIC_COUNT = 4000
 
-BPM_RANGE = (60, 150)
+# 合成乱択（prior は 40–240。速い側の教師欠落を埋める）
+BPM_RANGE = (60, 200)
 
 # 既定は 8 小節のみ（16/24/32 は 1 MIDI から多数パッチが出てディスクを圧迫する）
 BAR_LENGTH_CHOICES = (8,)
 
 # ギターらしい音域（MIDI note number）
-GUITAR_PITCH_MIN = 40
-GUITAR_PITCH_MAX = 76
-
+GUITAR_PITCH_MIN = 38
+GUITAR_PITCH_MAX = 88
 # ベース音域・プログラム（GM Electric Bass / finger → category 4）
 BASS_PITCH_MIN = 28
 BASS_PITCH_MAX = 55
@@ -178,6 +233,6 @@ BEAT_BPM_RANGE: dict[str, tuple[int, int]] = {
     "eight_basic": (80, 140),
     "tresillo": (80, 130),
     "disco": (110, 135),
-    "four_floor": (110, 150),
-    "metal_double": (120, 150),
+    "four_floor": (110, 200),
+    "metal_double": (120, 200),
 }

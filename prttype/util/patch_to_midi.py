@@ -30,11 +30,13 @@ def _extract_notes_from_channel(
     into onset_segment_ticks-tick segments so continuous activation becomes
     discrete strokes (e.g. 2 ticks = 8th, 4 ticks = quarter at resolution 4).
 
+    onset_segment_ticks <= 0: do not split (one note per contiguous blob).
+
     Blobs that contain any sustain (2) use the classic 2→1 re-attack rule.
     """
     notes: list[muspy.Note] = []
     start_tick = bar_index * 16
-    seg = max(1, int(onset_segment_ticks))
+    seg = int(onset_segment_ticks)
 
     for pitch in range(128):
         row = channel[:, pitch]
@@ -76,19 +78,29 @@ def _extract_notes_from_channel(
                         )
                     )
             else:
-                # All-onset blob: split into onset_segment_ticks-tick strokes.
-                pos = blob_start
-                while pos < blob_end:
-                    chunk_end = min(pos + seg, blob_end)
+                # All-onset blob: optional equal split (seg<=0 → keep whole blob).
+                if seg <= 0:
                     notes.append(
                         muspy.Note(
-                            time=start_tick + pos,
+                            time=start_tick + blob_start,
                             pitch=pitch,
                             velocity=DEFAULT_VELOCITY,
-                            duration=max(1, chunk_end - pos),
+                            duration=max(1, blob_end - blob_start),
                         )
                     )
-                    pos = chunk_end
+                else:
+                    pos = blob_start
+                    while pos < blob_end:
+                        chunk_end = min(pos + seg, blob_end)
+                        notes.append(
+                            muspy.Note(
+                                time=start_tick + pos,
+                                pitch=pitch,
+                                velocity=DEFAULT_VELOCITY,
+                                duration=max(1, chunk_end - pos),
+                            )
+                        )
+                        pos = chunk_end
 
     return notes
 

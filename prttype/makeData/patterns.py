@@ -19,6 +19,8 @@ from .constants import (
     PATTERN_WEIGHTS,
     PLACEMENT_WEIGHTS,
     STRUM_ARTICULATION_WEIGHTS,
+    STROKE_GROOVES,
+    STROKE_GROOVE_WEIGHTS,
     TICKS_PER_BAR,
 )
 from .progressions import (
@@ -27,7 +29,7 @@ from .progressions import (
     progression_chord_pitch_sets,
     resolve_progression_chords,
 )
-from .rhythm import sample_attacks_for_bpm
+from .rhythm import preferred_attacks_range, sample_attacks_for_bpm
 from .voicings import chord_pitches, power_chord_pitches, scale_pitches
 
 
@@ -47,6 +49,64 @@ def choose_placement(rng: random.Random) -> str:
     names = list(PLACEMENT_WEIGHTS.keys())
     weights = [PLACEMENT_WEIGHTS[n] for n in names]
     return rng.choices(names, weights=weights, k=1)[0]
+
+
+def _weighted_choice(spec: int | str | dict, rng: random.Random):
+    if isinstance(spec, dict):
+        keys = list(spec.keys())
+        weights = [float(spec[k]) for k in keys]
+        return rng.choices(keys, weights=weights, k=1)[0]
+    return spec
+
+
+def choose_stroke_groove(rng: random.Random, *, bpm: float | None = None) -> str:
+    """1曲=1グルーヴ。BPM 制約は groove の min_bpm/max_bpm のみ（固定 N は preferred で落とさない）。"""
+    ids = list(STROKE_GROOVE_WEIGHTS.keys())
+    weights = [float(STROKE_GROOVE_WEIGHTS[i]) for i in ids]
+    if bpm is not None:
+        filtered: list[str] = []
+        filtered_w: list[float] = []
+        for gid, w in zip(ids, weights):
+            g = STROKE_GROOVES[gid]
+            min_bpm = g.get("min_bpm")
+            max_bpm = g.get("max_bpm")
+            if min_bpm is not None and float(bpm) < float(min_bpm):
+                continue
+            if max_bpm is not None and float(bpm) > float(max_bpm):
+                continue
+            filtered.append(gid)
+            filtered_w.append(w)
+        if filtered:
+            ids, weights = filtered, filtered_w
+    return rng.choices(ids, weights=weights, k=1)[0]
+
+
+def resolve_groove(
+    groove_id: str,
+    bpm: float,
+    rng: random.Random,
+) -> tuple[int, str, str]:
+    """groove → (attacks_per_bar, placement, articulation)。"""
+    g = STROKE_GROOVES[groove_id]
+    attacks_spec = g.get("attacks", 8)
+    if isinstance(attacks_spec, dict):
+        lo, hi = preferred_attacks_range(float(bpm))
+        cands = [int(k) for k in attacks_spec.keys() if lo <= int(k) <= hi]
+        if not cands:
+            cands = [int(k) for k in attacks_spec.keys() if int(k) <= hi] or [
+                int(k) for k in attacks_spec.keys()
+            ]
+        weights = [float(attacks_spec[n]) for n in cands]
+        attacks = int(rng.choices(cands, weights=weights, k=1)[0])
+    else:
+        attacks = int(attacks_spec)
+
+    placement = str(_weighted_choice(g.get("placement", "even"), rng))
+    artic_w = g.get("articulation_weights") or STRUM_ARTICULATION_WEIGHTS
+    artic_names = list(artic_w.keys())
+    artic_weights = [float(artic_w[n]) for n in artic_names]
+    articulation = rng.choices(artic_names, weights=artic_weights, k=1)[0]
+    return attacks, placement, articulation
 
 
 def resolve_onset_ticks(
@@ -431,8 +491,8 @@ def sample_backing_power_chord_onsets(
     probability: float = BACKING_POWER_CHORD_PROBABILITY,
 ) -> set[int]:
     """lead条件用に、現行backing分布相当のパワーコードattack時刻を標本化する。"""
-    attacks = sample_attacks_for_bpm(bpm, rng)
-    placement = choose_placement(rng)
+    groove_id = choose_stroke_groove(rng, bpm=bpm)
+    attacks, placement, _articulation = resolve_groove(groove_id, bpm, rng)
     ticks = resolve_onset_ticks(attacks, placement, rng=rng)
     return {
         bar * TICKS_PER_BAR + tick
@@ -695,9 +755,8 @@ def generate_random_phrase(
         bars_per_chord = 1 if chords_per_bar >= 2 else rng.choice((1, 1, 1, 2))
         raise_odd = rng.random() < 0.85
         if pattern == "progression_strum":
-            articulation = choose_strum_articulation(rng)
-            attacks = sample_attacks_for_bpm(bpm_value, rng)
-            placement = choose_placement(rng)
+            groove_id = choose_stroke_groove(rng, bpm=bpm_value)
+            attacks, placement, articulation = resolve_groove(groove_id, bpm_value, rng)
             onset_ticks = resolve_onset_ticks(attacks, placement, rng=rng)
             music = generate_progression_strum(
                 spec=spec,
@@ -720,6 +779,7 @@ def generate_random_phrase(
                 "bars_per_chord": bars_per_chord,
                 "chords_per_bar": chords_per_bar,
                 "raise_odd_loop_last": raise_odd,
+                "stroke_groove": groove_id,
                 "articulation": articulation,
                 "attacks_per_bar": attacks,
                 "placement": placement,
@@ -757,9 +817,8 @@ def generate_random_phrase(
 
     if pattern == "chord_strum":
         quality = rng.choice(CHORD_QUALITIES)
-        articulation = choose_strum_articulation(rng)
-        attacks = sample_attacks_for_bpm(bpm_value, rng)
-        placement = choose_placement(rng)
+        groove_id = choose_stroke_groove(rng, bpm=bpm_value)
+        attacks, placement, articulation = resolve_groove(groove_id, bpm_value, rng)
         onset_ticks = resolve_onset_ticks(attacks, placement, rng=rng)
         music = generate_chord_strum(
             key=key,
@@ -774,6 +833,7 @@ def generate_random_phrase(
             "pattern": pattern,
             "key": key,
             "quality": quality,
+            "stroke_groove": groove_id,
             "articulation": articulation,
             "attacks_per_bar": attacks,
             "placement": placement,

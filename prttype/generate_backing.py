@@ -75,6 +75,7 @@ def generate_backing_music(
     onset_th: float = 0.3,
     peak_min_distance: int = 2,
     release_gap_ticks: int = 1,
+    onset_segment_ticks: int = 2,
     model: Any | None = None,
     device: Any | None = None,
 ) -> muspy.Music:
@@ -125,7 +126,9 @@ def generate_backing_music(
                 release_gap_ticks=release_gap_ticks,
             )
 
-    music = patches_to_music(output_patches)
+    music = patches_to_music(
+        output_patches, onset_segment_ticks=onset_segment_ticks
+    )
     music = export_guitar_music(
         remap_tonal_program(music, guitar_program),
         program=guitar_program,
@@ -153,6 +156,7 @@ def generate_backing(
     onset_th: float = 0.3,
     peak_min_distance: int = 2,
     release_gap_ticks: int = 1,
+    onset_segment_ticks: int = 2,
     model: Any | None = None,
     device: Any | None = None,
     apply_tech: bool = True,
@@ -186,6 +190,7 @@ def generate_backing(
         onset_th=onset_th,
         peak_min_distance=peak_min_distance,
         release_gap_ticks=release_gap_ticks,
+        onset_segment_ticks=onset_segment_ticks,
         model=model,
         device=device,
     )
@@ -267,7 +272,13 @@ def main() -> None:
     parser.add_argument(
         "--no-chord-peak-decode",
         action="store_true",
-        help="コード共通ピークデコードをOFF（従来の閾値+2tick分割）",
+        help="コード共通ピークデコードをOFF（閾値量子化。分割は --onset-segment-ticks）",
+    )
+    parser.add_argument(
+        "--onset-segment-ticks",
+        type=int,
+        default=2,
+        help="all-onset blob の分割幅。0以下で分割なし（2=8分相当）",
     )
     parser.add_argument(
         "--no-apply-tech",
@@ -312,6 +323,7 @@ def main() -> None:
         seed=args.seed,
         temperature=args.temperature,
         chord_peak_decode=not args.no_chord_peak_decode,
+        onset_segment_ticks=args.onset_segment_ticks,
         apply_tech=not args.no_apply_tech,
         tech_checkpoint=args.tech_checkpoint,
         tech_seed=args.seed,
