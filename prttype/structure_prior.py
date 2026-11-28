@@ -19,46 +19,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from makeData.progressions import progression_ok_for_mode
+from makeData.progressions import (
+    PROGRESSION_BY_NAME,
+    PROGRESSIONS as _PROGRESSION_SPECS,
+    progression_ok_for_mode,
+)
 
 # valence + arousal の 2次元のみ
 FEATURE_DIM = 2
 
-PROGRESSIONS: tuple[str, ...] = (
-    "marusa",
-    "komuro",
-    "canon_short",
-    "canon_full",
-    "jpop_subdom",
-    "classic_turnaround",
-    "two_five_one",
-    "doowop",
-    "pop_axis",
-    "cycle_1625",
-    "subdom_start",
-    "resolve_4516",
-    "descending_bass",
-    "deceptive",
-    "plagal_ish",
-    "simple_15",
-    "simple_14",
-    "simple_16",
-    "simple_64",
-    "simple_45",
-    "minor_komuro",
-    "minor_natural_loop",
-    "minor_basic",
-    "minor_rock",
-    "minor_expand",
-    "minor_marusa_like",
-    "minor_simple_17",
-    "minor_simple_16",
-    "minor_simple_14",
-    "rock_bVII",
-    "rock_I_IV_bVII_IV",
-    "rock_vi_walkdown",
-    "blues_12bar_short",
-)
+# makeData.progressions と常に同期（Memo proceed##### 含む）
+PROGRESSIONS: tuple[str, ...] = tuple(spec.name for spec in _PROGRESSION_SPECS)
 
 KEYS: tuple[str, ...] = (
     "C",
@@ -106,17 +77,7 @@ BPM_BIN_EDGES: tuple[float, ...] = (
 N_BPM_BINS = len(BPM_BIN_EDGES) - 1
 
 _PROGRESSION_FAMILY: dict[str, str] = {
-    **{
-        n: "diatonic_major"
-        for n in PROGRESSIONS
-        if not n.startswith("minor_")
-        and n not in ("rock_bVII", "rock_I_IV_bVII_IV", "rock_vi_walkdown", "blues_12bar_short")
-    },
-    **{n: "diatonic_minor" for n in PROGRESSIONS if n.startswith("minor_")},
-    "rock_bVII": "borrowed",
-    "rock_I_IV_bVII_IV": "borrowed",
-    "rock_vi_walkdown": "borrowed",
-    "blues_12bar_short": "blues",
+    n: PROGRESSION_BY_NAME[n].family for n in PROGRESSIONS if n in PROGRESSION_BY_NAME
 }
 
 

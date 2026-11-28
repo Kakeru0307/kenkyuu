@@ -383,6 +383,9 @@ def match_progression(
         for rot in rotations(loop):
             if rot == cat:
                 return spec.name, 0
+        # 7th潰し一致は既存カタログ向け。proceed* は 1-17-1-1 が 1-1-1-1 に吸われるので除外
+        if spec.name.startswith("proceed"):
+            continue
         for rot in rotations(collapsed):
             if rot == cat_c:
                 return spec.name, 0
