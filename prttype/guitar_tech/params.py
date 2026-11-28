@@ -43,12 +43,36 @@ NOTE_MULTIPLY_TECHS = frozenset(
 LEAD_ALLOWED_TECHS = frozenset(TECH_NAMES)
 BACKING_ALLOWED_TECHS = frozenset(TECH_NAMES) - NOTE_MULTIPLY_TECHS
 
-# リード基準のトラック間 velocity ゲイン
+# 推論: normal(none) logit 加点（大きいほど控えめ）。本線・CLI の既定。
+NONE_BIAS = 1.6
+
+# 前ノートから音程が動くレガート／重なりで slide logit を足す（0=補正なし）
+SLIDE_CONTEXT_BIAS = 1.0
+SLIDE_CONTEXT_INTERVAL = (1, 7)  # 半音
+SLIDE_CONTEXT_GAP_MAX = 0.12  # 秒。負＝重なり
+
+# レア奏法一律加点（0=補正なし）
+RARE_TECH_BIAS = 0.0
+RARE_TECHS: frozenset[str] = frozenset(
+    {
+        "pull",
+        "hammer",
+        "tap",
+        "tremolo",
+        "ghost",
+        "choke_strong",
+        "prebend",
+        "bend_release",
+        "arming",
+    }
+)
+
+# リード基準のトラック間 velocity ゲイン（伴奏を下げ、lead / 低音を前に）
 TRACK_VEL_GAINS: dict[str, float] = {
-    "lead": 1.0,
-    "backing": 0.85,
-    "bass": 0.80,
-    "drums": 0.75,
+    "lead": 1.5,
+    "backing": 0.76,
+    "bass": 0.90,
+    "drums": 0.95,
 }
 
 

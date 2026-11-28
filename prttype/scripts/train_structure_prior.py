@@ -67,6 +67,7 @@ EQUAL_SOURCES: frozenset[str] = frozenset(
         "pmemo",
         "deam",
         "fme24",
+        "memo2496",
         "bal_high_fast",
         "bal_highV_lowA",
         "bal_lowV_highA",

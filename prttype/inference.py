@@ -133,6 +133,9 @@ def load_model(checkpoint_path: Path, device: torch.device) -> torch.nn.Module:
     model.load_state_dict(state)
     model.to(device)
     model.eval()
+    role = checkpoint.get("role")
+    if isinstance(role, str):
+        setattr(model, "role", role)
     return model
 
 
@@ -153,6 +156,18 @@ def _append_beat_cond(tensor: torch.Tensor, beat_type: str) -> torch.Tensor:
     b, _, h, w = tensor.shape
     beat_id = beat_type_to_id(beat_type)
     onehot = make_beat_onehot_map(beat_id, height=h, width=w)
+    cond = torch.from_numpy(onehot).to(device=tensor.device, dtype=tensor.dtype)
+    cond = cond.unsqueeze(0).expand(b, -1, -1, -1)
+    return torch.cat([tensor, cond], dim=1)
+
+
+def _append_groove_cond(tensor: torch.Tensor, stroke_groove: str) -> torch.Tensor:
+    """(B,12,H,W) → (B,20,H,W)。stroke/arp one-hot 8ch。"""
+    from makeData.stroke_cond import groove_cond_to_id, make_groove_onehot_map
+
+    b, _, h, w = tensor.shape
+    gid = groove_cond_to_id(stroke_groove)
+    onehot = make_groove_onehot_map(gid, height=h, width=w)
     cond = torch.from_numpy(onehot).to(device=tensor.device, dtype=tensor.dtype)
     cond = cond.unsqueeze(0).expand(b, -1, -1, -1)
     return torch.cat([tensor, cond], dim=1)
@@ -240,11 +255,12 @@ def predict_patches(
     seed: int | None = None,
     temperature: float = 1.0,
     bpm: float = 120.0,
-    chord_peak_decode: bool = True,
+    chord_peak_decode: bool = False,
     peak_min_distance: int = 2,
     release_gap_ticks: int = 1,
     blocked_power_onsets: set[int] | frozenset[int] | None = None,
     section_role: str | None = None,
+    stroke_groove: str | None = None,
 ) -> list[MidiPatch]:
     if guitar_only and bass_only:
         raise ValueError("guitar_only と bass_only は同時に True にできません")
@@ -252,6 +268,34 @@ def predict_patches(
     is_cvae = isinstance(model, (CVAEUNet, FiLMCVAEUNet))
     if is_cvae and seed is not None:
         torch.manual_seed(seed)
+
+    role = getattr(model, "role", None)
+    in_ch = model_in_channels(model)
+
+    def _append_role_conds(tensor: torch.Tensor, *, patch_bar_index: int) -> torch.Tensor:
+        if in_ch < 12:
+            return tensor
+        tensor = _append_bpm_cond(tensor, bpm)
+        # backing: 11+BPM+groove8=20。lead: 11+BPM+power+section7=20。role で分岐。
+        if role == "backing" or (role is None and stroke_groove is not None and in_ch >= 13):
+            if in_ch >= 13:
+                groove = stroke_groove or "eight_even"
+                tensor = _append_groove_cond(tensor, groove)
+        else:
+            if in_ch >= 13:
+                tensor = _append_power_attack_cond(
+                    tensor,
+                    blocked_power_onsets,
+                    patch_bar_index=patch_bar_index,
+                )
+            if in_ch >= 20:
+                tensor = _append_section_cond(tensor, section_role)
+        if tensor.shape[1] != in_ch:
+            raise ValueError(
+                f"model expects {in_ch} input channels, got {tensor.shape[1]} "
+                f"(role={role!r}, stroke_groove={stroke_groove!r})"
+            )
+        return tensor
 
     predicted: list[MidiPatch] = []
     with torch.no_grad():
@@ -264,32 +308,11 @@ def predict_patches(
 
             tensor = torch.from_numpy(normalize_pianoroll(model_input)).unsqueeze(0).to(device)
             if is_cvae:
-                if model.in_channels >= 12:
-                    tensor = _append_bpm_cond(tensor, bpm)
-                if model.in_channels >= 13:
-                    tensor = _append_power_attack_cond(
-                        tensor,
-                        blocked_power_onsets,
-                        patch_bar_index=patch.bar_index,
-                    )
-                if model.in_channels >= 20:
-                    tensor = _append_section_cond(tensor, section_role)
+                tensor = _append_role_conds(tensor, patch_bar_index=patch.bar_index)
                 output = model.sample(tensor, temperature=temperature)
             else:
                 if tensor.shape[1] == 11:
-                    in_ch = model_in_channels(model)
-                    if in_ch >= 12:
-                        tensor = _append_bpm_cond(tensor, bpm)
-                    if in_ch >= 13:
-                        tensor = _append_power_attack_cond(
-                            tensor,
-                            blocked_power_onsets,
-                            patch_bar_index=patch.bar_index,
-                        )
-                    if tensor.shape[1] != in_ch:
-                        raise ValueError(
-                            f"model expects {in_ch} input channels, got {tensor.shape[1]}"
-                        )
+                    tensor = _append_role_conds(tensor, patch_bar_index=patch.bar_index)
                 output = model(tensor)
             output = output.squeeze(0).cpu().numpy()
 

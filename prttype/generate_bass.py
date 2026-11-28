@@ -1,7 +1,8 @@
 """ベース MIDI を生成する。
 
 流れ: 進行骨格 → bass CVAE（cat4）→ ルートなぞり後処理 → Bass トラック。
-kick_times がある場合、小節上限内でキック時刻にルートを補強する。
+kick_times がある場合、キック時刻にルートを補強し（上限超過時は非キックを間引き）、
+キック軸へ密度を寄せる。
 """
 
 from __future__ import annotations
@@ -146,14 +147,19 @@ def _reinforce_kick_roots(
     bars_per_chord: int,
     kick_times: set[int] | frozenset[int],
     energy: EnergyLevel = "mid",
+    strict: bool = True,
 ) -> muspy.Music:
-    """キック時刻にベースルートが無い場合、小節上限内で追加する。"""
+    """キック時刻にベースルートが無い場合、追加する。
+
+    strict=True のとき、小節上限超過なら非キック音を1つ落としてキックを優先する。
+    """
     if not kick_times:
         return music
     spec = get_progression(progression)
     chords = resolve_progression_chords(spec, key)
     bpc = max(1, bars_per_chord)
     max_onsets = max_onsets_for_energy(energy)
+    kick_q = {(int(t) // BEAT_TICKS) * BEAT_TICKS for t in kick_times}
 
     bass_track = _bass_track(music)
     if bass_track is None:
@@ -165,6 +171,30 @@ def _reinforce_kick_roots(
     for n in bass_track.notes:
         bar_counts[int(n.time) // TICKS_PER_BAR] += 1
 
+    def _drop_non_kick_in_bar(bar: int) -> bool:
+        candidates = [
+            n
+            for n in bass_track.notes
+            if int(n.time) // TICKS_PER_BAR == bar
+            and (int(n.time) // BEAT_TICKS) * BEAT_TICKS not in kick_q
+        ]
+        if not candidates:
+            return False
+        # 弱拍・低 velocity から落とす
+        victims = sorted(
+            candidates,
+            key=lambda n: (
+                _BEAT_PRIORITY.get(int(n.time) % TICKS_PER_BAR, 9),
+                int(n.velocity),
+            ),
+            reverse=True,
+        )
+        victim = victims[0]
+        bass_track.notes.remove(victim)
+        existing.discard(int(victim.time))
+        bar_counts[bar] = max(0, bar_counts[bar] - 1)
+        return True
+
     for t in sorted(kick_times):
         t4 = (int(t) // BEAT_TICKS) * BEAT_TICKS
         if t4 in existing:
@@ -173,13 +203,14 @@ def _reinforce_kick_roots(
         if bar < 0 or bar >= bars:
             continue
         if bar_counts[bar] >= max_onsets:
-            continue
+            if not (strict and _drop_non_kick_in_bar(bar)):
+                continue
         slot = (bar // bpc) % len(chords)
         root = root_in_bass_range(chords[slot][0])
         existing.add(t4)
         bar_counts[bar] += 1
         bass_track.append(
-            muspy.Note(time=t4, pitch=root, duration=BEAT_TICKS, velocity=90)
+            muspy.Note(time=t4, pitch=root, duration=BEAT_TICKS, velocity=100)
         )
     bass_track.notes = sorted(bass_track.notes, key=lambda n: (n.time, n.pitch))
     return music
@@ -260,6 +291,8 @@ def generate_bass_music(
         energy=energy,
     )
     if kick_times:
+        from util.ensemble_lock import boost_kick_aligned_bass, prune_off_kick_bass
+
         music = _reinforce_kick_roots(
             music,
             progression=progression,
@@ -268,7 +301,10 @@ def generate_bass_music(
             bars_per_chord=bpc,
             kick_times=kick_times,
             energy=energy,
+            strict=True,
         )
+        music = prune_off_kick_bass(music, kick_times, keep_beat_ticks=True)
+        music = boost_kick_aligned_bass(music, kick_times, velocity=100, window=0)
     music = _apply_tempo(music, bpm)
     return music
 

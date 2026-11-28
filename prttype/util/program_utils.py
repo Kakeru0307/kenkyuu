@@ -15,9 +15,9 @@ GUITAR_PROGRAM_NAMES: dict[int, str] = {
     30: "Distortion Guitar",
 }
 
-# ギター想定音域（MIDI note number）
-GUITAR_PITCH_MIN = 40
-GUITAR_PITCH_MAX = 76
+# ギター音域フィルタ（推論後）。制限なし（モデル出力を通す）
+GUITAR_PITCH_MIN = 0
+GUITAR_PITCH_MAX = 127
 
 # GM Electric Bass (finger) → program // 8 == 4
 BASS_PROGRAM = 33

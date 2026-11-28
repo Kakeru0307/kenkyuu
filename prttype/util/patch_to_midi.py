@@ -21,7 +21,7 @@ DEFAULT_RESOLUTION = 4
 def _extract_notes_from_channel(
     channel: np.ndarray,
     bar_index: int,
-    onset_segment_ticks: int = 2,
+    onset_segment_ticks: int = 0,
 ) -> list[muspy.Note]:
     """channel: (128, 128) time x pitch with values 0/1/2.
 
@@ -30,11 +30,13 @@ def _extract_notes_from_channel(
     into onset_segment_ticks-tick segments so continuous activation becomes
     discrete strokes (e.g. 2 ticks = 8th, 4 ticks = quarter at resolution 4).
 
+    onset_segment_ticks <= 0: do not split (one note per contiguous blob).
+
     Blobs that contain any sustain (2) use the classic 2→1 re-attack rule.
     """
     notes: list[muspy.Note] = []
     start_tick = bar_index * 16
-    seg = max(1, int(onset_segment_ticks))
+    seg = int(onset_segment_ticks)
 
     for pitch in range(128):
         row = channel[:, pitch]
@@ -76,28 +78,98 @@ def _extract_notes_from_channel(
                         )
                     )
             else:
-                # All-onset blob: split into onset_segment_ticks-tick strokes.
-                pos = blob_start
-                while pos < blob_end:
-                    chunk_end = min(pos + seg, blob_end)
+                # All-onset blob: optional equal split (seg<=0 → keep whole blob).
+                if seg <= 0:
                     notes.append(
                         muspy.Note(
-                            time=start_tick + pos,
+                            time=start_tick + blob_start,
                             pitch=pitch,
                             velocity=DEFAULT_VELOCITY,
-                            duration=max(1, chunk_end - pos),
+                            duration=max(1, blob_end - blob_start),
                         )
                     )
-                    pos = chunk_end
+                else:
+                    pos = blob_start
+                    while pos < blob_end:
+                        chunk_end = min(pos + seg, blob_end)
+                        notes.append(
+                            muspy.Note(
+                                time=start_tick + pos,
+                                pitch=pitch,
+                                velocity=DEFAULT_VELOCITY,
+                                duration=max(1, chunk_end - pos),
+                            )
+                        )
+                        pos = chunk_end
 
     return notes
+
+
+def sustain_origin_note_keys_from_channel(
+    channel: np.ndarray,
+    bar_index: int,
+) -> set[tuple[int, int]]:
+    """Blob 内に 2 がある経路から出るノートの (time, pitch)。
+
+    ``_extract_notes_from_channel`` の sustain 分岐と同じ切り方。
+    """
+    keys: set[tuple[int, int]] = set()
+    start_tick = bar_index * 16
+    for pitch in range(128):
+        row = channel[:, pitch]
+        w = 0
+        while w < 128:
+            if row[w] == 0:
+                w += 1
+                continue
+            blob_start = w
+            while w < 128 and row[w] != 0:
+                w += 1
+            blob_end = w
+            blob = row[blob_start:blob_end]
+            if not bool((blob == 2).any()):
+                continue
+            pos = blob_start
+            while pos < blob_end:
+                note_start = pos
+                prev = int(row[pos])
+                pos += 1
+                while pos < blob_end:
+                    val = int(row[pos])
+                    if val == 1 and prev == 2:
+                        break
+                    prev = val
+                    pos += 1
+                keys.add((start_tick + note_start, pitch))
+    return keys
+
+
+def sustain_origin_note_keys_from_patches(
+    patches: list[MidiPatch],
+    *,
+    category: int | None = None,
+) -> set[tuple[int, int]]:
+    """パッチ群から sustain(2) 由来ノートの (time, pitch) を集める。"""
+    keys: set[tuple[int, int]] = set()
+    cats = range(NUM_CATEGORIES) if category is None else (int(category),)
+    for patch in patches:
+        tonal = patch.tonal_chw
+        if tonal.ndim == 3 and tonal.shape[0] == NUM_CATEGORIES:
+            pianoroll = tonal.transpose(1, 2, 0)
+        else:
+            pianoroll = tonal
+        for cat in cats:
+            keys |= sustain_origin_note_keys_from_channel(
+                pianoroll[:, :, cat], patch.bar_index
+            )
+    return keys
 
 
 def tonal_chw_to_tracks(
     tonal_chw: np.ndarray,
     bar_index: int,
     *,
-    onset_segment_ticks: int = 2,
+    onset_segment_ticks: int = 0,
 ) -> list[muspy.Track]:
     """(11, 128, 128) -> muspy tracks grouped by category."""
     if tonal_chw.ndim == 3 and tonal_chw.shape[0] == NUM_CATEGORIES:
@@ -129,7 +201,7 @@ def drum_chw_to_track(
     drum_chw: np.ndarray,
     bar_index: int,
     *,
-    onset_segment_ticks: int = 2,
+    onset_segment_ticks: int = 0,
 ) -> muspy.Track | None:
     if drum_chw.ndim == 3:
         channel = drum_chw[0]
@@ -153,7 +225,7 @@ def patches_to_music(
     patches: list[MidiPatch],
     *,
     from_normalized: bool = False,
-    onset_segment_ticks: int = 2,
+    onset_segment_ticks: int = 0,
 ) -> muspy.Music:
     track_map: dict[int, muspy.Track] = {}
     drum_track: muspy.Track | None = None

@@ -66,6 +66,12 @@ def _append_note(
     )
 
 
+# form / patch 系は resolution=4（16分格子）。tremolo 等の 25–70ms は
+# その PPQ だと start/end が同一 tick に潰れ、SMF write で note-off が消えて
+# 同 pitch が曲末まで伸びる。奏法書き出しだけ高 PPQ にする。
+TECH_WRITE_RESOLUTION = 480
+
+
 def copy_timing(src: pm.PrettyMIDI, dst: pm.PrettyMIDI) -> None:
     """Copy tempo map / time signatures so DAW beat grid matches the source.
 
@@ -76,6 +82,83 @@ def copy_timing(src: pm.PrettyMIDI, dst: pm.PrettyMIDI) -> None:
     if hasattr(src, "_tick_scales") and src._tick_scales:
         dst._tick_scales = [(int(tick), float(scale)) for tick, scale in src._tick_scales]
     dst.time_signature_changes = list(src.time_signature_changes)
+
+
+def sanitize_same_pitch_overlaps(
+    inst: pm.Instrument,
+    *,
+    min_dur: float = _MIN_NOTE_SEC,
+) -> int:
+    """Cut earlier note so same-pitch notes never overlap (SMF is 1 voice/pitch)."""
+    from collections import defaultdict
+
+    by_pitch: dict[int, list[pm.Note]] = defaultdict(list)
+    for n in inst.notes:
+        by_pitch[int(n.pitch)].append(n)
+    cuts = 0
+    for ns in by_pitch.values():
+        ns.sort(key=lambda n: (float(n.start), float(n.end)))
+        for a, b in zip(ns, ns[1:]):
+            if float(b.start) < float(a.end) - 1e-9:
+                a.end = max(float(a.start) + min_dur, float(b.start))
+                cuts += 1
+            if float(a.end) <= float(a.start):
+                a.end = float(a.start) + min_dur
+    return cuts
+
+
+def remaster_for_tech_write(
+    src: pm.PrettyMIDI,
+    *,
+    resolution: int = TECH_WRITE_RESOLUTION,
+) -> pm.PrettyMIDI:
+    """Rebuild at higher PPQ so sub-16th notes survive PrettyMIDI SMF I/O.
+
+    Absolute times (seconds) are preserved; only tick quantization changes.
+    """
+    times, tempos = src.get_tempo_changes()
+    initial = float(tempos[0]) if len(tempos) else 120.0
+    out = pm.PrettyMIDI(resolution=int(resolution), initial_tempo=initial)
+    # mid-song tempo changes (tick scales in the new PPQ)
+    for t, tempo in zip(times[1:], tempos[1:]):
+        tick = int(out.time_to_tick(float(t)))
+        scale = 60.0 / (float(tempo) * float(resolution))
+        out._tick_scales.append((tick, scale))
+    out.time_signature_changes = [
+        pm.TimeSignature(ts.numerator, ts.denominator, float(ts.time))
+        for ts in src.time_signature_changes
+    ]
+    for inst in src.instruments:
+        sanitize_same_pitch_overlaps(inst)
+        ni = pm.Instrument(
+            program=int(inst.program),
+            is_drum=bool(inst.is_drum),
+            name=inst.name,
+        )
+        for n in inst.notes:
+            if float(n.end) <= float(n.start):
+                continue
+            ni.notes.append(
+                pm.Note(
+                    velocity=int(n.velocity),
+                    pitch=int(n.pitch),
+                    start=float(n.start),
+                    end=float(n.end),
+                )
+            )
+        for pb in inst.pitch_bends:
+            ni.pitch_bends.append(pm.PitchBend(pitch=int(pb.pitch), time=float(pb.time)))
+        for cc in getattr(inst, "control_changes", []) or []:
+            ni.control_changes.append(
+                pm.ControlChange(
+                    number=int(cc.number),
+                    value=int(cc.value),
+                    time=float(cc.time),
+                )
+            )
+        ni.pitch_bends.sort(key=lambda b: (b.time, b.pitch))
+        out.instruments.append(ni)
+    return out
 
 
 def assign_techs(notes: list[NoteEvent], rng: random.Random) -> list[NoteLabel]:
@@ -133,12 +216,26 @@ def render_target(
             tech == "slide" and p.get("mode") == "notes"
         )
         if uses_pb and note_has_overlap(notes, i):
-            tech, p = "normal", {"vel_scale": float(p.get("vel_scale", 1.0))}
+            # slide は前ノートからこの音へ滑り込ませる（それ以外の PB は従来どおり不可）
+            if tech != "slide" or i <= 0:
+                tech, p = "normal", {"vel_scale": float(p.get("vel_scale", 1.0))}
+            else:
+                p["mode"] = "pb"
 
         vel_scale = float(p.get("vel_scale", 1.0))
         base_vel = int(max(1, min(127, round(n.velocity * vel_scale))))
 
-        if n.end <= n.start:
+        # 次が「前→後」slide なら、この音を次の開始で切って PB の土台を空ける
+        note_end = float(n.end)
+        nxt_lb = label_by_i.get(i + 1) if i + 1 < len(notes) else None
+        if (
+            nxt_lb is not None
+            and canonicalize_tech(nxt_lb.tech) == "slide"
+            and notes[i + 1].start < n.end - 1e-6
+        ):
+            note_end = max(n.start + _MIN_NOTE_SEC, min(n.end, float(notes[i + 1].start)))
+
+        if note_end <= n.start:
             _append_note(
                 inst, velocity=base_vel, pitch=n.pitch, start=n.start, end=n.start + _MIN_NOTE_SEC
             )
@@ -232,38 +329,47 @@ def render_target(
                     inst, velocity=vel, pitch=n.pitch, start=n.start, end=n.start + length
                 )
             continue
-        if tech == "slide" and p.get("mode") == "notes" and i + 1 < len(notes):
+        if tech == "slide" and p.get("mode") == "notes" and i + 1 < len(notes) and i <= 0:
+            # notes モードは非重なり・先頭付近向け。重なり前→後は PB 経路へ
             nxt = notes[i + 1]
             direction = 1 if nxt.pitch >= n.pitch else -1
             start_p = int(n.pitch - direction * int(round(p["from_semitone"])))
             start_p = max(0, min(127, start_p))
-            slide_end = min(n.end - _MIN_NOTE_SEC, n.start + p["slide_ms"] / 1000.0)
+            slide_end = min(note_end - _MIN_NOTE_SEC, n.start + p["slide_ms"] / 1000.0)
             slide_end = max(n.start + _MIN_NOTE_SEC, slide_end)
             _append_note(
                 inst, velocity=n.velocity, pitch=start_p, start=n.start, end=slide_end
             )
-            if slide_end < n.end:
+            if slide_end < note_end:
                 _append_note(
-                    inst, velocity=n.velocity, pitch=n.pitch, start=slide_end, end=n.end
+                    inst, velocity=n.velocity, pitch=n.pitch, start=slide_end, end=note_end
                 )
             continue
 
         # default: keep note (with vel_scale), maybe add PB
         _append_note(
-            inst, velocity=base_vel, pitch=n.pitch, start=n.start, end=n.end
+            inst, velocity=base_vel, pitch=n.pitch, start=n.start, end=note_end
         )
+        # PB 描画用に tip まで切ったノート長を渡す
+        n_pb = NoteEvent(pitch=n.pitch, start=n.start, end=note_end, velocity=n.velocity)
         if tech == "vibrato":
-            _add_vibrato_pb(inst, n, p)
+            _add_vibrato_pb(inst, n_pb, p)
         elif tech in ("bend", "choke_strong"):
-            _add_bend_up_pb(inst, n, p)
+            _add_bend_up_pb(inst, n_pb, p)
         elif tech == "prebend":
-            _add_prebend_pb(inst, n, p)
+            _add_prebend_pb(inst, n_pb, p)
         elif tech == "bend_release":
-            _add_bend_release_pb(inst, n, p)
+            _add_bend_release_pb(inst, n_pb, p)
         elif tech == "arming":
-            _add_arming_pb(inst, n, p)
+            _add_arming_pb(inst, n_pb, p)
         elif tech == "slide":
-            _add_slide_pb(inst, n, p, notes[i + 1] if i + 1 < len(notes) else None)
+            _add_slide_pb(
+                inst,
+                n_pb,
+                p,
+                nxt=notes[i + 1] if i + 1 < len(notes) else None,
+                prev=notes[i - 1] if i > 0 else None,
+            )
 
     # Stable PB order for players that assume time-sorted events
     inst.pitch_bends.sort(key=lambda b: (b.time, b.pitch))
@@ -364,19 +470,29 @@ def _add_slide_pb(
     inst: pm.Instrument,
     n: NoteEvent,
     p: dict[str, Any],
-    nxt: NoteEvent | None,
+    nxt: NoteEvent | None = None,
+    prev: NoteEvent | None = None,
 ) -> None:
-    semi = float(p["from_semitone"])
-    if nxt is not None and nxt.pitch < n.pitch:
-        semi = -semi
-    elif nxt is None:
-        semi = -abs(semi)
+    """滑り込み PB。prev があれば前の音高 → この音高へ（±2半音に clamp）。"""
+    if prev is not None:
+        delta = float(n.pitch - prev.pitch)  # +なら下から上がってくる
+        delta = max(-2.0, min(2.0, delta))
+        if abs(delta) < 0.15:
+            return
+        # heard = pitch + pb_semitones。開始を prev 相当に → pb0 = prev - n = -delta
+        semi0 = -delta
     else:
-        semi = abs(semi) if nxt.pitch >= n.pitch else -abs(semi)
-    # start from offset and land at 0 when reaching note pitch
+        semi = float(p.get("from_semitone", 1.0))
+        if nxt is not None and nxt.pitch < n.pitch:
+            semi = -abs(semi)
+        elif nxt is None:
+            semi = -abs(semi)
+        else:
+            semi = abs(semi) if nxt.pitch >= n.pitch else -abs(semi)
+        semi0 = -semi
     slide = float(p["slide_ms"]) / 1000.0
     t1 = min(n.end, n.start + slide)
-    inst.pitch_bends.append(pm.PitchBend(pitch=_pb_semitone(-semi), time=n.start))
+    inst.pitch_bends.append(pm.PitchBend(pitch=_pb_semitone(semi0), time=n.start))
     inst.pitch_bends.append(pm.PitchBend(pitch=0, time=t1))
     _reset_pb(inst, n.end)
 
