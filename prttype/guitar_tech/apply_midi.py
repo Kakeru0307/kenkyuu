@@ -24,13 +24,24 @@ from .features import (
 )
 from .eligibility import apply_eligibility
 from .params import (
+    NONE_BIAS,
+    RARE_TECH_BIAS,
+    RARE_TECHS,
+    SLIDE_CONTEXT_BIAS,
+    SLIDE_CONTEXT_GAP_MAX,
+    SLIDE_CONTEXT_INTERVAL,
     TECH_NAMES,
     TRACK_VEL_GAINS,
     allowed_techs_for_role,
     canonicalize_tech,
     sample_params,
 )
-from .render import NoteLabel, labels_to_jsonable, render_target
+from .render import (
+    NoteLabel,
+    labels_to_jsonable,
+    remaster_for_tech_write,
+    render_target,
+)
 
 
 def load_apply_model(
@@ -110,6 +121,28 @@ def predict_labels(
         for i, name in enumerate(tech_names):
             if canonicalize_tech(name) not in allowed_techs:
                 logits[:, i] = -1e9
+    # レア奏法を一律加点（pull/hammer 等が argmax で消える対策）
+    if RARE_TECH_BIAS:
+        logits = logits.clone()
+        for i, name in enumerate(tech_names):
+            if canonicalize_tech(name) in RARE_TECHS:
+                logits[:, i] = logits[:, i] + float(RARE_TECH_BIAS)
+    # 前→後に動くレガート／重なりでは slide を加点（学習不足・none_bias 対策）
+    try:
+        slide_i = next(
+            i for i, n in enumerate(tech_names) if canonicalize_tech(n) == "slide"
+        )
+    except StopIteration:
+        slide_i = -1
+    if slide_i >= 0 and SLIDE_CONTEXT_BIAS:
+        logits = logits.clone()
+        lo, hi = SLIDE_CONTEXT_INTERVAL
+        for i in range(1, len(notes)):
+            prev, cur = notes[i - 1], notes[i]
+            interval = abs(int(cur.pitch) - int(prev.pitch))
+            gap = float(cur.start) - float(prev.end)
+            if lo <= interval <= hi and gap <= float(SLIDE_CONTEXT_GAP_MAX):
+                logits[i, slide_i] = logits[i, slide_i] + float(SLIDE_CONTEXT_BIAS)
     pred = logits.argmax(dim=-1).cpu().tolist()
     labels: list[NoteLabel] = []
     for i, tid in enumerate(pred):
@@ -118,8 +151,18 @@ def predict_labels(
         if allowed_techs is not None and tech not in allowed_techs:
             tech = "normal"
         if tech in PB_TECHS and note_has_overlap(notes, i):
-            tech = "normal"
+            # slide は前ノートからこの音へ滑り込ませてよい
+            if tech != "slide" or i <= 0:
+                tech = "normal"
         params = sample_params(tech, rng) if tech != "normal" else {}
+        if tech == "slide" and i > 0:
+            prev_n, cur_n = notes[i - 1], notes[i]
+            gap = float(cur_n.start) - float(prev_n.end)
+            params["from_semitone"] = float(
+                max(0.5, min(2.0, abs(int(cur_n.pitch) - int(prev_n.pitch))))
+            )
+            if note_has_overlap(notes, i) or gap <= float(SLIDE_CONTEXT_GAP_MAX):
+                params["mode"] = "pb"
         vs = float(vel_pred[i]) if i < len(vel_pred) else 1.0
         params["vel_scale"] = max(0.15, min(1.5, vs))
         labels.append(NoteLabel(note_index=i, tech=tech, params=params))
@@ -200,10 +243,20 @@ def assign_labels_for_midi(
             for j, lb in enumerate(voice_labels):
                 gi = voice_idx[j]
                 tech = lb.tech
+                params = dict(lb.params or {})
                 if tech in PB_TECHS and note_has_overlap(notes, gi):
-                    tech = "normal"
+                    if tech != "slide" or gi <= 0:
+                        tech = "normal"
+                    else:
+                        params["mode"] = "pb"
+                        params["from_semitone"] = float(
+                            max(
+                                0.5,
+                                min(2.0, abs(int(notes[gi].pitch) - int(notes[gi - 1].pitch))),
+                            )
+                        )
                 labels[gi] = NoteLabel(
-                    gi, tech, lb.params if tech != "normal" else {"vel_scale": 1.0}
+                    gi, tech, params if tech != "normal" else {"vel_scale": 1.0}
                 )
         else:
             labels = predict_labels(
@@ -249,7 +302,8 @@ def assign_labels_for_midi(
     if render:
         out = Path(out_path) if out_path else Path(midi_path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        src.write(str(out))
+        # form の resolution=4 のまま書くと tremolo 短音の note-off が消えドローン化
+        remaster_for_tech_write(src).write(str(out))
     return all_labels, out
 
 
@@ -290,7 +344,7 @@ def balance_track_velocities(
             n.velocity = int(max(1, min(127, round(n.velocity * g))))
     out = Path(out_path) if out_path else path
     out.parent.mkdir(parents=True, exist_ok=True)
-    src.write(str(out))
+    remaster_for_tech_write(src).write(str(out))
     return out
 
 
@@ -422,7 +476,7 @@ def apply_section_techs_to_track(
             src.instruments[idx] = rendered.instruments[0]
     out = Path(out_path) if out_path else path
     out.parent.mkdir(parents=True, exist_ok=True)
-    src.write(str(out))
+    remaster_for_tech_write(src).write(str(out))
     return out
 
 
@@ -508,8 +562,8 @@ def main() -> None:
     parser.add_argument(
         "--none-bias",
         type=float,
-        default=0.0,
-        help="none クラス logit に足すバイアス（大きいほど控えめ）",
+        default=NONE_BIAS,
+        help=f"none クラス logit に足すバイアス（既定 {NONE_BIAS}。大きいほど控えめ）",
     )
     parser.add_argument(
         "--all-voices",

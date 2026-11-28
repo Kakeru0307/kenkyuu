@@ -24,8 +24,14 @@ def filter_tech_for_note(
         return "normal"
     if tech == "tremolo" and n.duration < 0.25:
         return "normal"
-    if tech == "slide" and index + 1 >= len(notes):
-        return "normal"
+    if tech == "slide":
+        # 前→後、または次ノートへの滑り込み。どちらも無ければ不可
+        if index <= 0 and index + 1 >= len(notes):
+            return "normal"
+        # 重なりでも「前の音からこの音へ」なら許可（描画側で前を切って PB）
+        if note_has_overlap(notes, index) and index <= 0:
+            return "normal"
+        return tech
     if tech == "mute" and n.pitch > 64:
         # high notes: mute less typical; keep if explicitly labeled but soft-gate in synth only
         pass

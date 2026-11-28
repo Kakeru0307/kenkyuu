@@ -151,15 +151,15 @@ STROKE_GROOVES: dict[str, dict] = {
     },
 }
 
-# 条件 ch 学習向けに 7 型均等（相対重み。choices が正規化）
+# 推論抽選用（相対重み。choices が正規化）。密めのロック寄りに寄せる
 STROKE_GROOVE_WEIGHTS: dict[str, float] = {
-    "eight_even": 1.0,
-    "four_down": 1.0,
-    "sixteen_busy": 1.0,
-    "backbeat_chop": 1.0,
-    "front_heavy": 1.0,
-    "sparse_pad": 1.0,
-    "rest_groove": 1.0,
+    "eight_even": 2.0,
+    "four_down": 1.8,
+    "sixteen_busy": 1.2,
+    "backbeat_chop": 1.6,
+    "front_heavy": 1.6,
+    "sparse_pad": 0.35,
+    "rest_groove": 0.30,
 }
 
 # 学習・推論 one-hot 順。7 stroke + arp（PATTERN の progression_arpeggio）

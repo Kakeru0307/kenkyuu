@@ -1,0 +1,99 @@
+---
+description: >-
+  研究リポジトリ統合ルール（現状本線 generate_form・配置・handoff・生成結果・
+  データセット・downscope禁止・判断用一時ファイル禁止・FAD/MAD）
+alwaysApply: true
+---
+
+# プロジェクトルール（統合）
+
+## 1. 現状の本線仕様（`generate_form.py`）— 誤称禁止
+
+```text
+ふわっと日本語（--text。省略時はカタログ乱択）
+  → WRIME/VA（analyze_va）
+  → structure prior（ckpt 無ければカタログ乱択）: 進行・キー・BPM 等
+  → 構成レイヤ（song_form）: セクション配置、区間ごとの進行 / beat_type / 奏法 / bars
+  → 区間ごと連結: バッキング＋リード＋ドラム＋ベース（キー・BPMは曲通し）
+  → リード奏法を pitch bend 付与（区間が決定）
+```
+
+| レイヤ | 決めること |
+|---|---|
+| VA（`analyze_va`） | 文から valence / arousal |
+| structure prior | VA→進行・キー・BPM 等（ckpt 無ければカタログ乱択。CLI 明示指定なし） |
+| 構成（`song_form`） | セクション配置、区間ごとの進行 / beat_type / 奏法 / bars。U-Net の仕事ではない |
+| 4パート演奏 | 区間条件の下でバッキング・リード・ドラム・ベースを生成し連結（キー・BPMは曲通し） |
+| リード奏法 | 区間が決めた奏法を、保存時に pitch bend で付与 |
+
+未到達: 学習強弱、学習済み条件エンコーダ head。
+
+- 進行・キー・BPM の**明示指定 CLI は禁止**
+- manifest から学習曲1件を選ばない
+- ViTex D3PM / DualUNet 再生成は主軸外（本線の奏法 PB とも別）
+- prior だけでは長尺にならない（構成レイヤ必須）
+- クリップ確認: `generate_backing.py`（`--seed` のみ可）。本線長尺: `generate_form.py`
+
+```text
+❌ manifest選択 = 自由生成 / priorだけ = 長尺完成 / U-Net = 構成学習済み
+❌ BPM条件ch = BPM生成 / 明示指定CLI = 本線入力 / D3PM = 奏法
+✅ 現状本線 = 文→VA→prior→song_form→4パート連結→リード奏法PB
+```
+
+
+## 2. No silent downscope
+
+目標（最終形・本線）が示されたらその目標に向けて進める。  
+縮小・暫定を出すときは**提案の前に理由を明示**（データ不足・環境欠如・ユーザーが分割要求・ブロッカー）。理由なしの「小さく」は禁止。本線と矛盾する簡易経路を完成扱いしない。
+
+## 3. prttype / Colab・FAD/MAD・進め方
+
+| 場所 | やること |
+|---|---|
+| `prttype/` | 推論・生成。学習・pairs を置かない |
+| `colab_train/` | 学習・pairs・prepare（Colab） |
+| `prttype/util/` | patch I/O・program・density・checkpoint・progression・skeleton |
+
+- `sample_structure_params.py` は残す。`template_prior` 削除済（構成は `song_form`）
+- 不要コードは stash せず削除。学習重複は `colab_train` を正とする
+- 自動評価「2つ」= **FAD と MAD**（MusPy/Chu とは別）。MAD 主・FAD 副
+- MAD 単独: `testMad/`（`scripts/compute_mad.py`・`colab_mad.ipynb`）
+- 現行データ: 参照 `testMad/ref/{midi,wav}` **101本**（ギター前景＋広げたインスト。一覧は `docs/その他/MAD参照_ギターバンド基準と候補曲.md`）、生成 `testMad/gen/{midi,wav}` 100本（WAV は git 外・Drive）
+- FAD: `.\venv\Scripts\python.exe prttype\scripts\compute_fad.py <参照WAV dir> <生成WAV dir>`
+- MIDI→WAV: `testMad/scripts/midi_to_wav.py`（ローカル SF）。選曲一覧は `docs/その他/MAD参照MIDI_採用基準と選曲一覧.md`
+- MAD/FAD 本番は Colab GPU。`pip install mad_metric`（torch は Colab 既存）
+- ゴール進捗は **% のみ**。venv 忘れない。`--seed` は必須にしない
+- 次回ゴール一覧スライドはギター奏法付与側
+
+## 4. Handoff load（会話あたり1回）
+
+実質作業の前に一度だけ:
+
+1. 無関係トピックならスキップ
+2. `.cursor/handoff/HANDOFF.md`（空なら `docs/user/` → `docs/auto/` → `docs/version/` の最新 `*_handoff.md`）
+3. Goal / Status / Next を3行。Decisions を覆さない
+
+詳細: `handoff-load` skill。保存: `handoff-save` skill のみ。
+
+## 5. 生成結果ログ（`docs/生成結果`）
+
+実験記録時（コードのみ・依頼なしはスキップ）。
+
+- フォルダ: `docs/生成結果/<M>-<D>-<HH>-<mm>/`（衝突時 `-<SS>`）
+- md と midi を同居、MIDI は1本、見出し順: データの内容 → 生成結果 → 得られた結論
+- パイプライン: `.cursor/skills/generate-and-log/SKILL.md`
+
+## 6. Dataset doc sync
+
+`PATTERN_WEIGHTS` / `ATTACKS_PER_BAR_*` / 合成本数・小節 / prepare_all 既定 / Colab の manifest 本数が変わったら、同ターンで `docs/データ/データセット.md` を更新（日付・§0・該当表・§1-6/§7 履歴）。MIDI 未再生成なら「再生成待ち」。
+
+## 7. 判断用一時ファイル禁止
+
+一覧・パス・曲名の**採用判断は目視**。判断用の一時 py / スコア機械 / ワンショット json・md 量産は禁止。  
+シェルでの列挙・確定 URL の DL・指定パスの tar 抽出は可（短命、すぐ消す）。  
+**成果物 md は `docs/` 配下**（ユーザー明示時）。Python は判断に使わず機械作業のみ。
+
+## 8,音楽生成に関して
+今プロジェクトの生成は基本的にform.pyで行い、それら以外の生成は基本行わない。
+生成物はmidiフォルダに入れ一時的なフォルダを作成しない.
+

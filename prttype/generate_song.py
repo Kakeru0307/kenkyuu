@@ -54,7 +54,7 @@ def generate_song(
     apply_tech: bool = True,
     tech_checkpoint: Path | None = None,
     tech_seed: int | None = None,
-    tech_none_bias: float = 0.0,
+    tech_none_bias: float | None = None,
 ) -> Path:
     """backing + lead を生成して 2 トラック MIDI に統合する（ギターは既定で奏法付与）。"""
     MIDI_DIR.mkdir(parents=True, exist_ok=True)
@@ -73,10 +73,8 @@ def generate_song(
             bars_per_chord=bars_per_chord,
             checkpoint=backing_ckpt,
             guitar_program=GUITAR_OVERDRIVE_PROGRAM,
-            apply_tech=apply_tech,
-            tech_checkpoint=tech_checkpoint,
-            tech_seed=tech_seed,
-            tech_none_bias=tech_none_bias,
+            # Backing は奏法付与しない（Lead のみ）
+            apply_tech=False,
         )
         tracks += _load_tracks(backing_path, "Backing")
         blocked_power_onsets = power_chord_attack_times(muspy.read_midi(backing_path))
@@ -176,10 +174,15 @@ def main() -> None:
     parser.add_argument(
         "--no-apply-tech",
         action="store_true",
-        help="ギター奏法付与をスキップ（既定は常時付与）",
+        help="Lead の奏法付与をスキップ（Backing は常時なし）",
     )
     parser.add_argument("--tech-checkpoint", type=Path, default=None)
-    parser.add_argument("--tech-none-bias", type=float, default=0.0)
+    parser.add_argument(
+        "--tech-none-bias",
+        type=float,
+        default=None,
+        help="奏法付与: none logit バイアス（省略時: guitar_tech.params.NONE_BIAS）",
+    )
     args = parser.parse_args()
 
     params = resolve_structure_params(

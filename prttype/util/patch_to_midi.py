@@ -105,6 +105,66 @@ def _extract_notes_from_channel(
     return notes
 
 
+def sustain_origin_note_keys_from_channel(
+    channel: np.ndarray,
+    bar_index: int,
+) -> set[tuple[int, int]]:
+    """Blob 内に 2 がある経路から出るノートの (time, pitch)。
+
+    ``_extract_notes_from_channel`` の sustain 分岐と同じ切り方。
+    """
+    keys: set[tuple[int, int]] = set()
+    start_tick = bar_index * 16
+    for pitch in range(128):
+        row = channel[:, pitch]
+        w = 0
+        while w < 128:
+            if row[w] == 0:
+                w += 1
+                continue
+            blob_start = w
+            while w < 128 and row[w] != 0:
+                w += 1
+            blob_end = w
+            blob = row[blob_start:blob_end]
+            if not bool((blob == 2).any()):
+                continue
+            pos = blob_start
+            while pos < blob_end:
+                note_start = pos
+                prev = int(row[pos])
+                pos += 1
+                while pos < blob_end:
+                    val = int(row[pos])
+                    if val == 1 and prev == 2:
+                        break
+                    prev = val
+                    pos += 1
+                keys.add((start_tick + note_start, pitch))
+    return keys
+
+
+def sustain_origin_note_keys_from_patches(
+    patches: list[MidiPatch],
+    *,
+    category: int | None = None,
+) -> set[tuple[int, int]]:
+    """パッチ群から sustain(2) 由来ノートの (time, pitch) を集める。"""
+    keys: set[tuple[int, int]] = set()
+    cats = range(NUM_CATEGORIES) if category is None else (int(category),)
+    for patch in patches:
+        tonal = patch.tonal_chw
+        if tonal.ndim == 3 and tonal.shape[0] == NUM_CATEGORIES:
+            pianoroll = tonal.transpose(1, 2, 0)
+        else:
+            pianoroll = tonal
+        for cat in cats:
+            keys |= sustain_origin_note_keys_from_channel(
+                pianoroll[:, :, cat], patch.bar_index
+            )
+    return keys
+
+
 def tonal_chw_to_tracks(
     tonal_chw: np.ndarray,
     bar_index: int,

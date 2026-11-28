@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,7 @@ def _write_form_manifest(
     bpm: float,
     va: tuple[float, float],
     form: SongForm,
+    lead_seed_base: int | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "id": path.stem,
@@ -123,6 +125,7 @@ def _write_form_manifest(
         "bpm": float(bpm),
         "va": [float(va[0]), float(va[1])],
         "template_id": form.template_id,
+        "lead_seed_base": lead_seed_base,
         "sections": [
             {
                 "role": s.role,
@@ -133,6 +136,8 @@ def _write_form_manifest(
                 "stroke_groove": s.stroke_groove,
                 "technique_type": s.technique_type,
                 "energy": s.energy,
+                "song_energy": s.song_energy,
+                "effective_energy": s.effective_energy,
                 "arrangement_id": s.arrangement_id,
             }
             for s in form.sections
@@ -152,6 +157,7 @@ def _apply_lead_note_techs(
         apply_techniques_to_midi,
         balance_track_velocities,
     )
+    from guitar_tech.params import NONE_BIAS
 
     ckpt = Path("checkpoints/guitar_tech/guitar_tech_apply_last.pt")
     if not ckpt.is_file():
@@ -161,8 +167,9 @@ def _apply_lead_note_techs(
         checkpoint=ckpt,
         out_path=midi_path,
         seed=seed,
-        none_bias=2.0,  # 学習の class-balance 補正。normal 寄りにしてうるささを抑える
-        top_voice=True,
+        none_bias=NONE_BIAS,  # slide/rare は params で相対補正
+        # 全ノート対象。同時発音の PB 系は eligibility が normal に落とす
+        top_voice=False,
         role="lead",
         instrument_name="Lead",
     )
@@ -191,8 +198,21 @@ def generate_form(
     onset_segment_ticks: int = 0,
     with_lead: bool = True,
     harmony_thin_level: int = 0,
+    max_onsets_per_bar: int = 6,
+    max_note_duration_ticks: int = 8,
+    lead_motif_score: bool = False,
+    motif_before_output: Path | None = None,
+    lead_onset_th: float | None = None,
+    lead_sustain_th: float | None = None,
+    lead_temperature: float | None = None,
+    models: dict | None = None,
 ) -> Path:
-    """構成テンプレに沿って 4 パートを連結し、1本の MIDI と form_manifest を保存する。"""
+    """構成テンプレに沿って 4 パートを連結し、1本の MIDI と form_manifest を保存する。
+
+    lead_motif_score: 区間 role に応じたメロ反復／変化スコアで lead を整える。
+    motif_before_output: 指定時、スコア適用前の同一生成を別 MIDI に保存する。
+    models: バッチ用。{'device','backing','lead','drum','bass'} を渡すと再ロードしない。
+    """
     bass_ckpt = Path(bass_checkpoint)
     drum_ckpt = Path(drum_checkpoint)
     if not bass_ckpt.is_file():
@@ -205,6 +225,7 @@ def generate_form(
         seed=seed,
         home_progression=progression,
         home_mode=resolved_mode,
+        va=va,
         bpm=float(bpm),
     )
     MIDI_DIR.mkdir(parents=True, exist_ok=True)
@@ -216,16 +237,31 @@ def generate_form(
 
     import torch
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    backing_model = load_model(checkpoint, device)
-    lead_model = load_model(lead_checkpoint, device) if with_lead else None
-    drum_model = load_model(drum_ckpt, device)
-    bass_model = load_model(bass_ckpt, device)
+    if models is not None:
+        device = models["device"]
+        backing_model = models["backing"]
+        lead_model = models.get("lead") if with_lead else None
+        drum_model = models["drum"]
+        bass_model = models["bass"]
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        backing_model = load_model(checkpoint, device)
+        lead_model = load_model(lead_checkpoint, device) if with_lead else None
+        drum_model = load_model(drum_ckpt, device)
+        bass_model = load_model(bass_ckpt, device)
 
     music: muspy.Music | None = None
     bar_offset = 0
     section_notes: list[tuple[str, str, str, str, int, int, int, int, int]] = []
     has_lead_notes = False
+
+    # lead は常に区間別 seed（本番 seed なしでも base を1回発行して同じ式を使う）
+    lead_seed_base = int(seed) if seed is not None else random.randint(0, 2**31 - 1)
+    print(
+        f"[lead-seed] base={lead_seed_base} "
+        f"(source={'cli' if seed is not None else 'random'}; "
+        f"section i → base+i*1009+j*91)"
+    )
 
     for i, section in enumerate(form.sections):
         section_seed = None if seed is None else int(seed) + i
@@ -304,7 +340,7 @@ def generate_form(
                     bars_per_chord=bars_per_chord,
                     checkpoint=bass_ckpt,
                     onset_th=float(decode["bass_onset_th"]),
-                    energy=section.energy,
+                    energy=section.effective_energy,
                     kick_times=kick_times,
                     model=bass_model,
                     device=device,
@@ -324,6 +360,12 @@ def generate_form(
                     if backing_part is not None
                     else frozenset()
                 )
+                lead_seed = int(lead_seed_base) + i * 1009 + j * 91
+                resolved_lead_onset = float(
+                    lead_onset_th
+                    if lead_onset_th is not None
+                    else decode["lead_onset_th"]
+                )
                 lead_part = generate_lead_music(
                     progression=prog,
                     key=key,
@@ -332,10 +374,19 @@ def generate_form(
                     bars_per_chord=bars_per_chord,
                     checkpoint=lead_checkpoint,
                     guitar_program=guitar_program,
-                    onset_th=float(decode["lead_onset_th"]),
-                    sustain_th=float(decode.get("lead_sustain_th", 0.72)),
-                    seed=seed,
+                    onset_th=resolved_lead_onset,
+                    sustain_th=float(
+                        lead_sustain_th
+                        if lead_sustain_th is not None
+                        else decode.get("lead_sustain_th", 0.64)
+                    ),
+                    seed=lead_seed,
+                    temperature=float(
+                        lead_temperature if lead_temperature is not None else temperature
+                    ),
                     harmony_thin_level=harmony_thin_level,
+                    max_onsets_per_bar=max_onsets_per_bar,
+                    max_note_duration_ticks=max_note_duration_ticks,
                     blocked_power_onsets=blocked_power,
                     section_role=section.role,
                     model=lead_model,
@@ -378,6 +429,30 @@ def generate_form(
         raise RuntimeError("セクションが空です")
 
     music.tempos = [muspy.Tempo(time=0, qpm=float(bpm))]
+
+    if lead_motif_score and has_lead_notes:
+        from util.lead_motif_score import apply_lead_motif_scores, clone_music
+
+        if motif_before_output is not None:
+            before_path = Path(motif_before_output)
+            before_path.parent.mkdir(parents=True, exist_ok=True)
+            before = clone_music(music)
+            save_music(before, before_path)
+            _apply_lead_note_techs(before_path, seed=seed)
+            print(f"motif before: {before_path}")
+
+        stats = apply_lead_motif_scores(
+            music,
+            form,
+            key=key,
+            mode=resolved_mode,
+            fix=True,
+        )
+        print(
+            f"[lead-motif] bars={stats['bars']} fixed={stats['fixed']} "
+            f"mean={float(stats['mean_score']):.1f} hook={stats.get('hook')}"
+        )
+
     save_music(music, output_path)
     if has_lead_notes:
         _apply_lead_note_techs(output_path, seed=seed)
@@ -385,6 +460,13 @@ def generate_form(
         from guitar_tech.apply_midi import balance_track_velocities
 
         balance_track_velocities(output_path, out_path=output_path)
+
+    # 固定 velocity=80 を拍アクセント＋曲シード型で振り直す（奏法・トラックゲインの後）
+    from util.velocity_humanize import humanize_midi_file
+
+    vel_seed = int(seed) if seed is not None else int(lead_seed_base)
+    _, vel_style = humanize_midi_file(output_path, seed=vel_seed)
+    print(f"[velocity] style={vel_style} seed={vel_seed}")
 
     manifest_path = output_path.with_suffix(".json")
     _write_form_manifest(
@@ -397,6 +479,7 @@ def generate_form(
         bpm=bpm,
         va=va,
         form=form,
+        lead_seed_base=lead_seed_base,
     )
 
     total = sum(len(t.notes) for t in music.tracks)
@@ -456,6 +539,47 @@ def main() -> None:
             "2=減点弱め / 3=和声ほぼ無視 / 4=和声スコアなし"
         ),
     )
+    parser.add_argument(
+        "--max-onsets-per-bar",
+        type=int,
+        default=6,
+        help="lead 小節あたり最大 onset（超過はスコア低い音から削除。1=最良1音のみ）",
+    )
+    parser.add_argument(
+        "--max-note-duration-ticks",
+        type=int,
+        default=8,
+        help="lead ノート最大長（resolution=4 で 8=2分）。0 以下で cap オフ",
+    )
+    parser.add_argument(
+        "--lead-motif-score",
+        action="store_true",
+        help="lead 小節の反復／変化スコアでピッチを整える",
+    )
+    parser.add_argument(
+        "--motif-before-output",
+        type=Path,
+        default=None,
+        help="--lead-motif-score 時、適用前 MIDI の保存先（同一生成の比較用）",
+    )
+    parser.add_argument(
+        "--lead-onset-th",
+        type=float,
+        default=None,
+        help="lead onset 閾値上書き（省略時は区間 energy の lead_onset_th）",
+    )
+    parser.add_argument(
+        "--lead-sustain-th",
+        type=float,
+        default=None,
+        help="lead sustain 閾値上書き（省略時は区間 energy の lead_sustain_th）",
+    )
+    parser.add_argument(
+        "--lead-temperature",
+        type=float,
+        default=None,
+        help="lead CVAE temperature（省略時は --temperature）",
+    )
     parser.add_argument("--list-templates", action="store_true")
     args = parser.parse_args()
 
@@ -486,6 +610,8 @@ def main() -> None:
         home_progression=params.progression,
         home_mode=home_mode,
         va=params.va,
+        bpm=params.bpm,
+        song_energy=params.energy,
     )
     generate_form(
         progression=params.progression,
@@ -508,6 +634,13 @@ def main() -> None:
         onset_segment_ticks=args.onset_segment_ticks,
         with_lead=not args.no_lead,
         harmony_thin_level=args.harmony_thin_level,
+        max_onsets_per_bar=args.max_onsets_per_bar,
+        max_note_duration_ticks=args.max_note_duration_ticks,
+        lead_motif_score=args.lead_motif_score,
+        motif_before_output=args.motif_before_output,
+        lead_onset_th=args.lead_onset_th,
+        lead_sustain_th=args.lead_sustain_th,
+        lead_temperature=args.lead_temperature,
     )
 
 

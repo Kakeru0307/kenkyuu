@@ -169,12 +169,12 @@ def generate_backing(
     onset_segment_ticks: int = 0,
     model: Any | None = None,
     device: Any | None = None,
-    apply_tech: bool = True,
+    apply_tech: bool = False,
     tech_checkpoint: Path | None = None,
     tech_seed: int | None = None,
-    tech_none_bias: float = 2.0,
+    tech_none_bias: float | None = None,
 ) -> Path:
-    """進行からバッキング MIDI を生成して保存する（既定で奏法付与）。"""
+    """進行からバッキング MIDI を生成して保存する（奏法付与は既定オフ。Lead のみ本線）。"""
     spec = get_progression(progression)
     chords = resolve_progression_chords(spec, key)
     chord_label = "-".join(
@@ -207,12 +207,13 @@ def generate_backing(
     save_music(music, output_path)
     if apply_tech:
         from guitar_tech.apply_midi import apply_techniques_overwrite
+        from guitar_tech.params import NONE_BIAS
 
         apply_techniques_overwrite(
             output_path,
             checkpoint=tech_checkpoint,
             seed=tech_seed if tech_seed is not None else seed,
-            none_bias=tech_none_bias,
+            none_bias=NONE_BIAS if tech_none_bias is None else float(tech_none_bias),
             role="backing",
             instrument_name="Backing",
         )
@@ -291,9 +292,9 @@ def main() -> None:
         help="all-onset blob の分割幅。既定0=分割なし（2=8分相当）",
     )
     parser.add_argument(
-        "--no-apply-tech",
+        "--apply-tech",
         action="store_true",
-        help="奏法付与をスキップ（既定は常時付与）",
+        help="Backing にも奏法付与する（既定オフ。本線は Lead のみ）",
     )
     parser.add_argument(
         "--tech-checkpoint",
@@ -304,8 +305,8 @@ def main() -> None:
     parser.add_argument(
         "--tech-none-bias",
         type=float,
-        default=0.0,
-        help="奏法付与: none logit バイアス（大きいほど控えめ）",
+        default=None,
+        help="奏法付与: none logit バイアス（省略時: guitar_tech.params.NONE_BIAS）",
     )
     args = parser.parse_args()
 
@@ -334,7 +335,7 @@ def main() -> None:
         temperature=args.temperature,
         chord_peak_decode=args.chord_peak_decode,
         onset_segment_ticks=args.onset_segment_ticks,
-        apply_tech=not args.no_apply_tech,
+        apply_tech=bool(args.apply_tech),
         tech_checkpoint=args.tech_checkpoint,
         tech_seed=args.seed,
         tech_none_bias=args.tech_none_bias,

@@ -1,1 +1,0 @@
-python main.py ./example.mid ./example.out
